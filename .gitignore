@@ -1,0 +1,28 @@
+# 环境变量与密钥（严禁提交，仅提交 .env.example）
+.env
+.env.local
+*.env
+
+# 虚拟环境
+.venv/
+venv/
+
+# Python 编译产物
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+build/
+dist/
+
+# 本地凭据/Token 缓存
+.choerodon_token.json
+*.token
+*.credential
+*.secret
+
+# 编辑器/IDE
+.idea/
+.vscode/
+.DS_Store
