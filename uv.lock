@@ -1088,7 +1088,7 @@ wheels = [
 ]
 
 [[package]]
-name = "zhenyun-pangun-mcp"
+name = "zhenyun-pangu-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

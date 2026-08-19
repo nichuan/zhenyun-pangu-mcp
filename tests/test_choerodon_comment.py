@@ -12,7 +12,7 @@ import pytest
 # 将 src 加入 import 路径（未在环境安装时）
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from zhenyun_pangun_mcp import choerodon  # noqa: E402
+from zhenyun_pangu_mcp import choerodon  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

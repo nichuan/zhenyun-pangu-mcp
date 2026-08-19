@@ -1,4 +1,4 @@
-"""zhenyun-pangun-mcp — 甄云盘古通用工具 MCP（完全自包含，无外部仓库依赖）。
+"""zhenyun-pangu-mcp — 甄云盘古通用工具 MCP（完全自包含，无外部仓库依赖）。
 
 工具按前缀分组：
   - obs_*       日志查询（Loki 双平台 aws/cn + 阿里云 SLS 仅 cn 盘古 prod）
@@ -15,10 +15,10 @@ from datetime import datetime, timedelta, timezone
 import requests
 from mcp.server.fastmcp import FastMCP
 
-from . import archery, choerodon, loki, search, sls, sls_config
+from . import archery, choerodon, loki, search, sls, sls_config, gitlab
 from .config import ARCHERY_INSTANCE_ALIASES, ARCHERY_DEFAULT_DB, LOKI_PLATFORMS
 
-mcp = FastMCP("zhenyun-pangun-mcp")
+mcp = FastMCP("zhenyun-pangu-mcp")
 BJ = timezone(timedelta(hours=8))
 
 
@@ -446,6 +446,103 @@ def search_repo(
             context=context, depth=depth,
         ))
     except Exception as e:  # 文件系统错误等
+        return _json({"error": str(e)})
+
+
+# ============================================================================
+# gitlab_* 代码平台（GitLab 仓库：项目/代码/文件/目录/分支，整合自 gitlab-code-mcp）
+# ============================================================================
+
+@mcp.tool()
+def gitlab_search_projects(query: str, per_page: int = 20) -> str:
+    """搜索 GitLab 项目（按名称/路径关键词）。"""
+    try:
+        client = gitlab.GitLabClient()
+        items = client.list_projects(query, per_page=per_page)
+        slim = [
+            {
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "path_with_namespace": p.get("path_with_namespace"),
+                "web_url": p.get("web_url"),
+                "default_branch": p.get("default_branch"),
+            }
+            for p in items
+        ]
+        return _json({"count": len(slim), "projects": slim})
+    except gitlab.GitLabError as e:
+        return _json({"error": str(e)})
+
+
+@mcp.tool()
+def gitlab_search_code(query: str, per_page: int = 20) -> str:
+    """GitLab 代码搜索（在配置的搜索根 group/project 下按关键词检索 blob）。
+
+    返回命中文件路径与行号，通常再配合 gitlab_get_file 读取具体内容。
+    """
+    try:
+        client = gitlab.GitLabClient()
+        results = client.search_code(query, per_page=per_page)
+        slim = [
+            {
+                "project_id": r.get("project_id"),
+                "path_with_namespace": r.get("path_with_namespace"),
+                "path": r.get("path"),
+                "filename": r.get("filename"),
+                "startline": r.get("startline"),
+                "ref": r.get("ref"),
+            }
+            for r in results
+        ]
+        return _json({"count": len(slim), "results": slim})
+    except gitlab.GitLabError as e:
+        return _json({"error": str(e)})
+
+
+@mcp.tool()
+def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
+    """读取 GitLab 仓库文件的原始内容（文本）。"""
+    try:
+        content = gitlab.GitLabClient().get_file(project_id, path, ref=ref)
+        return _json({"project_id": project_id, "path": path, "ref": ref, "content": content})
+    except gitlab.GitLabError as e:
+        return _json({"error": str(e)})
+
+
+@mcp.tool()
+def gitlab_list_tree(
+    project_id: str,
+    path: str = "",
+    ref: str = "master",
+    recursive: bool = False,
+    per_page: int = 100,
+) -> str:
+    """列出 GitLab 仓库目录树（文件/子目录）。"""
+    try:
+        items = gitlab.GitLabClient().list_tree(
+            project_id, path=path, ref=ref, recursive=recursive, per_page=per_page
+        )
+        return _json({"count": len(items), "tree": items})
+    except gitlab.GitLabError as e:
+        return _json({"error": str(e)})
+
+
+@mcp.tool()
+def gitlab_list_branches(project_id: str, per_page: int = 50) -> str:
+    """列出 GitLab 仓库分支。"""
+    try:
+        branches = gitlab.GitLabClient().list_branches(project_id, per_page=per_page)
+        slim = [
+            {
+                "name": b.get("name"),
+                "default": b.get("default"),
+                "protected": b.get("protected"),
+                "commit_short_id": (b.get("commit") or {}).get("short_id"),
+            }
+            for b in branches
+        ]
+        return _json({"count": len(slim), "branches": slim})
+    except gitlab.GitLabError as e:
         return _json({"error": str(e)})
 
 

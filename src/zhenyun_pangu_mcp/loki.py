@@ -12,7 +12,7 @@
 性能设计（根治超时 + 最大化复用登录）：
   - 进程内模块级缓存 _CLIENTS：同一进程内多次工具调用只登录一次。
   - 跨进程持久化：登录后把 grafana_session + 到期时间写入本地缓存文件
-    （~/.cache/zhenyun_pangun_mcp_grafana.json），MCP 每次启动（stdout 重新拉起）
+    （~/.cache/zhenyun_pangu_mcp_grafana.json），MCP 每次启动（stdout 重新拉起）
     先加载复用，仅在 session 过期/无效时重新登录，进一步减少登录次数。
   - 失效自动重登：查询/发现数据源返回 401/403 时，清除缓存并强制重新登录后重试一次。
 """
@@ -45,7 +45,7 @@ _LOGIN_LOCK = threading.Lock()
 
 # 跨进程持久化 cookie 缓存文件（session 有效期内复用，避免每次启动重复登录）。
 _COOKIE_CACHE = Path(
-    os.getenv("LOKI_COOKIE_CACHE") or str(Path.home() / ".cache" / "zhenyun_pangun_mcp_grafana.json")
+    os.getenv("LOKI_COOKIE_CACHE") or str(Path.home() / ".cache" / "zhenyun_pangu_mcp_grafana.json")
 )
 
 

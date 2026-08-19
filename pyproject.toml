@@ -1,5 +1,5 @@
 [project]
-name = "zhenyun-pangun-mcp"
+name = "zhenyun-pangu-mcp"
 version = "0.1.0"
 description = "甄云盘古通用工具 MCP — 数据库(Archery)/猪齿鱼(Choerodon)/日志(Loki 双平台)/跨仓搜索"
 readme = "README.md"
@@ -12,11 +12,11 @@ dependencies = [
 ]
 
 [project.scripts]
-zhenyun-pangun-mcp = "zhenyun_pangun_mcp.server:main"
+zhenyun-pangu-mcp = "zhenyun_pangu_mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/zhenyun_pangun_mcp"]
+packages = ["src/zhenyun_pangu_mcp"]

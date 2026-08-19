@@ -21,7 +21,7 @@ else:
     load_dotenv()
 
 # 包根目录(用于回退默认路径)
-PKG_ROOT = Path(__file__).resolve().parent.parent.parent  # .../zhenyun-pangun-mcp
+PKG_ROOT = Path(__file__).resolve().parent.parent.parent  # .../zhenyun-pangu-mcp
 REPO_ROOT = PKG_ROOT.parent  # 仓库根(同仓 zhenyun-tools)
 
 # ---------------------------------------------------------------------------
@@ -122,6 +122,21 @@ CHOERODON_PROJECT_ID = os.getenv("CHOERODON_PROJECT_ID", "58")
 CHOERODON_USERNAME = os.getenv("CHOERODON_USERNAME", "")
 CHOERODON_PASSWORD = os.getenv("CHOERODON_PASSWORD", "")
 CHOERODON_TOKEN_CACHE = os.getenv("CHOERODON_TOKEN_CACHE") or str(Path.home() / ".choerodon_token.json")
+
+
+# ---------------------------------------------------------------------------
+# GitLab 代码平台(整合自 gitlab-code-mcp;token 优先,缺失回退用户名密码)
+# 默认指向云原生 SRM 仓库网关
+# ---------------------------------------------------------------------------
+GITLAB_BASE_URL = os.getenv("GITLAB_BASE_URL", "https://code.choerodon.com.cn")
+GITLAB_TOKEN = os.getenv("GITLAB_TOKEN", "")
+GITLAB_USERNAME = os.getenv("GITLAB_USERNAME", "")
+GITLAB_PASSWORD = os.getenv("GITLAB_PASSWORD", "")
+# 代码搜索根目录(限定在该 group / 根 project 下,避免全站噪声)
+# 仅传其一:PROJECT_ID 优先;GROUP 用于 /search 范围限定
+GITLAB_SEARCH_ROOT_ID = os.getenv("GITLAB_SEARCH_ROOT_ID", "")
+GITLAB_SEARCH_ROOT_GROUP = os.getenv("GITLAB_SEARCH_ROOT_GROUP", "srm")
+GITLAB_SEARCH_DEFAULT_SCOPE = os.getenv("GITLAB_SEARCH_DEFAULT_SCOPE", "srm")
 
 # ---------------------------------------------------------------------------
 # 跨仓代码搜索根目录(纯本地遍历,默认回退到本仓库根,无需外部仓库)
