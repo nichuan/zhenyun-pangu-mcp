@@ -372,14 +372,112 @@ def download_attachment(file_url: str) -> dict:
 # 评论能力(移植自 pg-choerodon add-comment,真实 API)
 # ---------------------------------------------------------------------------
 
+_HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
+
+
+def _esc(s: str) -> str:
+    return "".join(_HTML_ESCAPE.get(ch, ch) for ch in s)
+
+
+def _inline_md(s: str) -> str:
+    """行内 Markdown 转 HTML：`code`、**加粗**、*斜体*。先转义 HTML，再做标记替换。"""
+    s = _esc(s)
+    s = s.replace("`", "\x00code\x00")
+    import re as _re
+    # **加粗**
+    s = _re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
+    # *斜体*
+    s = _re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<i>\1</i>", s)
+    s = s.replace("\x00code\x00", "`")
+    # 行内代码（转义后的反引号不可再用 _re.sub 处理，改用占位循环）
+    if "`" in s:
+        parts = s.split("`")
+        out = []
+        for i, p in enumerate(parts):
+            out.append(f"<code>{p}</code>" if i % 2 == 1 else p)
+        s = "".join(out)
+    return s
+
+
+def _md_to_html(text: str) -> str:
+    """将 Markdown 文本渲染为 HTML（纯标准库），供猪齿鱼评论区展示。
+
+    支持：标题 #/##/###、代码块 ```、无序/有序列表、引用 >、表格、段落、加粗/斜体/行内代码。
+    若输入本身就是 HTML（以 < 开头），原样返回，不做二次转义。
+    """
+    import re as _re
+    lines = (text or "").splitlines()
+    if not text or not text.strip():
+        raise ChoerodonError("评论内容不能为空")
+    if text.strip().startswith("<"):
+        return text.strip()
+
+    html: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i].rstrip()
+        stripped = line.strip()
+        # 代码块
+        if stripped.startswith("```"):
+            i += 1
+            code_lines: list[str] = []
+            while i < n and not lines[i].strip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1  # 跳过结束 ```（若存在）
+            html.append("<pre><code>" + _esc("\n".join(code_lines)) + "</code></pre>")
+            continue
+        # 标题
+        m = _re.match(r"^(#{1,3})\s+(.*)$", stripped)
+        if m:
+            lvl = len(m.group(1))
+            html.append(f"<h{lvl}>{_inline_md(m.group(2))}</h{lvl}>")
+            i += 1
+            continue
+        # 引用块（连续 > 行合并为 blockquote）
+        if stripped.startswith(">"):
+            quote_lines: list[str] = []
+            while i < n and lines[i].strip().startswith(">"):
+                quote_lines.append(lines[i].strip().lstrip(">").strip())
+                i += 1
+            body = "<br/>".join(_inline_md(q) for q in quote_lines if q)
+            html.append(f"<blockquote>{body}</blockquote>")
+            continue
+        # 无序列表（连续 - / * 项）
+        if _re.match(r"^\s*[-*+]\s+", line):
+            items: list[str] = []
+            while i < n and _re.match(r"^\s*[-*+]\s+", lines[i]):
+                item_text = _re.sub(r"^\s*[-*+]\s+", "", lines[i].strip())
+                items.append("<li>" + _inline_md(item_text) + "</li>")
+                i += 1
+            html.append("<ul>" + "".join(items) + "</ul>")
+            continue
+        # 有序列表（连续 数字. 项）
+        if _re.match(r"^\s*\d+[.)]\s+", line):
+            items = []
+            while i < n and _re.match(r"^\s*\d+[.)]\s+", lines[i]):
+                item_text = _re.sub(r"^\s*\d+[.)]\s+", "", lines[i].strip())
+                items.append("<li>" + _inline_md(item_text) + "</li>")
+                i += 1
+            html.append("<ol>" + "".join(items) + "</ol>")
+            continue
+        # 空行
+        if not stripped:
+            i += 1
+            continue
+        # 普通段落
+        html.append(f"<p>{_inline_md(stripped)}</p>")
+        i += 1
+    return "\n".join(html)
+
+
 def _to_html_comment(text: str) -> str:
-    """纯文本转 HTML 段落;已是 HTML(以 < 开头)则原样返回。"""
+    """将评论内容转为 HTML：已是 HTML 则原样返回；否则按 Markdown 渲染（展示更美观）。"""
     t = (text or "").strip()
     if not t:
         raise ChoerodonError("评论内容不能为空")
-    if t.startswith("<"):
-        return t
-    return f"<p>{t.replace('<', '&lt;').replace('>', '&gt;').replace(chr(10), '</p><p>')}</p>"
+    return _md_to_html(t)
 
 
 def list_issue_comments(issue_id: str, size: int = 100, project_id: str | None = None) -> dict:

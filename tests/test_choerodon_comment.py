@@ -16,16 +16,16 @@ from zhenyun_pangun_mcp import choerodon  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# _to_html_comment：纯文本 -> HTML 段落
+# _to_html_comment / _md_to_html：Markdown -> HTML
 # ---------------------------------------------------------------------------
 def test_to_html_comment_plain_text():
     html = choerodon._to_html_comment("你好，问题已修复")
     assert html == "<p>你好，问题已修复</p>"
 
 
-def test_to_html_comment_multiline():
+def test_to_html_comment_multiline_paragraphs():
     html = choerodon._to_html_comment("第一行\n第二行")
-    assert html == "<p>第一行</p><p>第二行</p>"
+    assert html == "<p>第一行</p>\n<p>第二行</p>"
 
 
 def test_to_html_comment_escapes_html_special():
@@ -41,6 +41,35 @@ def test_to_html_comment_passthrough_html():
 def test_to_html_comment_empty_raises():
     with pytest.raises(choerodon.ChoerodonError):
         choerodon._to_html_comment("  ")
+
+
+def test_md_to_html_heading():
+    assert choerodon._to_html_comment("## 问题定位") == "<h2>问题定位</h2>"
+
+
+def test_md_to_html_bold_and_inline_code():
+    html = choerodon._to_html_comment("使用 **UPDATE** 修复 `sodr_po_header`")
+    assert "<b>UPDATE</b>" in html
+    assert "<code>sodr_po_header</code>" in html
+
+
+def test_md_to_html_unordered_list():
+    html = choerodon._to_html_comment("- 根因A\n- 根因B")
+    assert "<ul>" in html
+    assert "<li>根因A</li>" in html
+    assert "<li>根因B</li>" in html
+
+
+def test_md_to_html_code_block():
+    html = choerodon._to_html_comment("```sql\nSELECT 1;\n```")
+    assert "<pre><code>" in html
+    assert "SELECT 1;" in html
+
+
+def test_md_to_html_quote():
+    html = choerodon._to_html_comment("> 影响范围：3 条数据")
+    assert "<blockquote>" in html
+    assert "影响范围：3 条数据" in html
 
 
 # ---------------------------------------------------------------------------
