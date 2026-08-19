@@ -368,6 +368,66 @@ def download_attachment(file_url: str) -> dict:
     return {"signed_url": target, "original_url": file_url}
 
 
+# ---------------------------------------------------------------------------
+# 评论能力(移植自 pg-choerodon add-comment,真实 API)
+# ---------------------------------------------------------------------------
+
+def _to_html_comment(text: str) -> str:
+    """纯文本转 HTML 段落;已是 HTML(以 < 开头)则原样返回。"""
+    t = (text or "").strip()
+    if not t:
+        raise ChoerodonError("评论内容不能为空")
+    if t.startswith("<"):
+        return t
+    return f"<p>{t.replace('<', '&lt;').replace('>', '&gt;').replace(chr(10), '</p><p>')}</p>"
+
+
+def list_issue_comments(issue_id: str, size: int = 100, project_id: str | None = None) -> dict:
+    """查询猪齿鱼任务的评论列表(按时间倒序,最近在前)。
+
+    issue_id 为加密 id(与 query_issue 一致)。
+    """
+    pid = project_id or DEFAULT_PROJECT_ID
+    path = f"/agile/v1/projects/{pid}/issue_comment/issue/{issue_id}/page" \
+           f"?organizationId=0&page=0&size={max(1, min(int(size), 200))}"
+    data = _request("GET", path)
+    comments = [
+        {
+            "commentId": str(c.get("commentId") or ""),
+            "author": str(c.get("userRealName") or c.get("userName") or ""),
+            "loginName": str(c.get("userLoginName") or ""),
+            "content": str(c.get("commentText") or c.get("htmlContent") or ""),
+            "updatedAt": str(c.get("lastUpdateDate") or ""),
+        }
+        for c in _list(data)
+    ]
+    return {"total": len(comments), "comments": comments}
+
+
+def create_issue_comment(issue_id: str, comment: str, project_id: str | None = None) -> dict:
+    """为猪齿鱼任务新增评论(写操作)。
+
+    issue_id 为加密 id;comment 支持纯文本或 HTML(纯文本自动转 <p> 段落)。
+    对应 API: POST /agile/v1/projects/{pid}/issue_comment,body={issueId, commentText}。
+    """
+    pid = project_id or DEFAULT_PROJECT_ID
+    html_content = _to_html_comment(comment)
+    # 写操作:先校验目标任务存在,避免误写
+    detail = get_issue_detail(issue_id, pid)
+    if not detail or not detail.get("issueId"):
+        raise ChoerodonError(f"任务不存在或无法访问: {issue_id}")
+    body = {"issueId": issue_id, "commentText": html_content}
+    _request("POST", f"/agile/v1/projects/{pid}/issue_comment", json_body=body)
+    return {
+        "ok": True,
+        "issueId": issue_id,
+        "issueNum": detail.get("issueNum", ""),
+        "summary": detail.get("summary", ""),
+        "commentText": html_content,
+        "note": "评论已写入猪齿鱼。",
+    }
+
+
 # 工具名 -> 处理函数映射(供 server.py 调用,返回 dict)
 CHOERODON_DISPATCH = {
     "query_issue": lambda issue_id, project_id=None: get_issue_detail(issue_id, project_id),
@@ -378,6 +438,8 @@ CHOERODON_DISPATCH = {
     "search_tasks_by_person": search_tasks_by_person,
     "list_attachments": list_attachments,
     "download_attachment": download_attachment,
+    "list_comments": lambda issue_id, size=100, project_id=None: list_issue_comments(issue_id, size, project_id),
+    "create_comment": lambda issue_id, comment, project_id=None: create_issue_comment(issue_id, comment, project_id),
 }
 
 

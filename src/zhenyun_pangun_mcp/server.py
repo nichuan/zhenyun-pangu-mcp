@@ -401,6 +401,27 @@ def choerodon_download_attachment(file_url: str) -> str:
     return _choerodon_call("download_attachment", file_url=file_url)
 
 
+@mcp.tool()
+def choerodon_list_comments(issue_id: str, size: int = 100, project_id: str = "") -> str:
+    """查询猪齿鱼任务的评论列表（只读）。
+
+    issue_id 为工单加密 ID（与 choerodon_query_issue 一致）。
+    返回每条评论的作者/登录名/内容/更新时间。写评论前先看现状。
+    """
+    return _choerodon_call("list_comments", issue_id=issue_id, size=size, project_id=project_id or None)
+
+
+@mcp.tool()
+def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> str:
+    """为猪齿鱼任务新增评论（写操作，有副作用）。
+
+    issue_id 为工单加密 ID；comment 支持纯文本或 HTML（纯文本自动转 <p> 段落）。
+    ⚠️ 写操作：会真实写入猪齿鱼，调用前必须向用户确认评论内容无误。
+    建议先调用 choerodon_list_comments 查看现状，再执行写入。
+    """
+    return _choerodon_call("create_comment", issue_id=issue_id, comment=comment, project_id=project_id or None)
+
+
 # ============================================================================
 # search_repo 跨仓搜索（内置纯标准库文件遍历,无外部脚本依赖）
 # ============================================================================
