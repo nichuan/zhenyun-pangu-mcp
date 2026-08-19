@@ -1,7 +1,7 @@
 """Archery 数据库客户端 + 盘古专属能力。
 
-复用 sql-ops-mcp 的认证模型（csrftoken + sessionid，双站点 cn/aws），
-在此基础上补充盘古专属能力：租户查询、实例列表、环境映射。
+使用 csrftoken + sessionid 认证模型（双站点 cn/aws），
+覆盖盘古专属能力：租户查询、实例列表、环境映射。
 
 只读安全：仅放行 SELECT/SHOW/DESC/EXPLAIN/WITH 前缀，写操作拦截。
 """
@@ -243,7 +243,7 @@ def _client(site: str) -> ArcheryClient:
 
 
 # ============================================================================
-# 盘古专属能力（补充 sql-ops 未覆盖的部分）
+# 盘古专属能力（租户查询、实例/库列表、环境映射）
 # ============================================================================
 
 def query_tenant(site: str, tenant: str | None, instance_name: str, db_name: str) -> dict:

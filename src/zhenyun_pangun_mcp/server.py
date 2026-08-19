@@ -287,7 +287,7 @@ def archery_query_tenant(
 ) -> str:
     """查询租户信息（hpfm_tenant）。tenant 为空时列出前 100 个租户。
 
-    盘古专属能力：sql-ops-mcp 未覆盖的多租户查询。
+    盘古专属能力：多租户查询。
     site=cn 国内 / aws 日本云(JP-SaaS-1)。instance 可用别名：
     cn: prod/prod-ro/dev/test；aws: aws(=aws-prod, 正式环境 JP-SaaS-1-Prod-RW-8.0)。
     """

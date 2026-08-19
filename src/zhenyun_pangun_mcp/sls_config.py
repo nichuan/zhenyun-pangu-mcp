@@ -1,6 +1,6 @@
 """盘古系统环境 → 阿里云 SLS(project/logstore/namespace)映射与凭据加载。
 
-对接方式复刻自 log-ops-mcp:
+对接方式说明:
 - 仅 cn 国内盘古 prod 走阿里云 SLS(project: pangu-cn-saas-3-prod-shared-sls-project-0)
 - 盘古非生产(dev/test)与全部 AWS 环境均走 Loki,不应调用本模块
 

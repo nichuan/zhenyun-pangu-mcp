@@ -1,6 +1,6 @@
 """阿里云 SLS(日志服务)签名查询客户端 —— 纯标准库,零依赖。
 
-复刻自 log-ops-mcp,用于查询 cn 国内盘古 prod(阿里云日志)的日志;非生产环境日志在 Loki。
+用于查询 cn 国内盘古 prod(阿里云日志)的日志;非生产环境日志在 Loki。
 官方对接方式:HTTP 请求带 LOG 签名头(x-log-apiversion=0.6.0, hmac-sha1)。
 """
 
