@@ -59,15 +59,23 @@ def _time_bounds(from_time: int | None, to_time: int | None, time_range: str) ->
     return now - 7200, now
 
 
+def _timeout_hint(start: int, end: int) -> str:
+    """Loki 查询失败/超时时的处置建议（基于时间窗宽窄给出可执行提示）。"""
+    span = max(0, end - start)
+    if span > 2 * 3600:
+        return "（时间窗较宽导致查询慢/超时，请缩小时间范围后重试）"
+    return "（查询失败，请确认 query 是否正确、env 是否来自 obs_log_datasources）"
+
+
 # ============================================================================
 # obs_* 日志工具
 # ============================================================================
 
 @mcp.tool()
 def obs_log_query(
-    region: str,
-    env: str,
-    query: str,
+    region: str = "cn",
+    env: str = "nonprod",
+    query: str = "",
     time_range: str = "2h",
     from_time: int | None = None,
     to_time: int | None = None,
@@ -80,22 +88,28 @@ def obs_log_query(
     国内非 prod 已切换至 Loki 风格，地址 logs.going-link.net。
     query 为 LogQL 表达式，如 '{app="srm-gateway"} |= "403"'。
     time_range 支持 30m/2h/1d/today/yesterday 或 "YYYY-MM-DD HH:mm~HH:mm"（北京时间）。
+
+    注：MCP 直接调 Loki HTTP API，query 即 LogQL 字符串；与「用户手册」在
+    Grafana 页面手工选 namespace/app 缩小范围不同，这里必须在 query 中显式写
+    标签过滤（如 {namespace="saas-test-new"}），否则将扫描全部数据流（见 warning）。
     """
     if region not in LOKI_PLATFORMS:
         return _json({"error": f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）"})
+    if not query or not query.strip():
+        return _json({"error": "query 不能为空，必须传入 LogQL 表达式，如 '{namespace=\"saas-test-new\"} |= \"xxx\"'"})
     ds_name = loki.resolve_datasource(region, env)
-    client = loki.GrafanaClient(region)
-    client.login()
-    ds = client.discover_loki_datasources(ds_name)
-    if not ds:
-        return _json({"error": f"未找到数据源 {ds_name}"})
+    client = loki._get_client(region)
+    uid = client.resolve_uid(ds_name)
+
+    warning = loki.warn_unscoped(query)
 
     start, end = _time_bounds(from_time, to_time, time_range)
     limit = max(1, min(int(limit), 5000))
     try:
-        resp = client.loki_query_range(ds[0]["uid"], query, start, end, limit, direction)
+        resp = client.loki_query_range(uid, query, start, end, limit, direction)
     except loki.LokiError as e:
-        return _json({"error": str(e)})
+        hint = _timeout_hint(start, end)
+        return _json({"error": f"{e}{hint}"})
 
     if resp.get("status") != "success":
         return _json({"error": f"Loki 查询失败: {json.dumps(resp)[:500]}"})
@@ -118,7 +132,68 @@ def obs_log_query(
         "start": fmt(start),
         "end": fmt(end),
         "total": len(rows),
+        **({"warning": warning} if warning else {}),
         "results": [{"time": fmt(r["ts"]), "line": r["line"][:400]} for r in top],
+    })
+
+
+@mcp.tool()
+def obs_log_trace(
+    trace_id: str,
+    region: str = "cn",
+    env: str = "nonprod",
+    time_range: str = "2h",
+    from_time: int | None = None,
+    to_time: int | None = None,
+    limit: int = 200,
+    direction: str = "BACKWARD",
+    level: str = "all",
+    clip_len: int = 600,
+) -> str:
+    """按 traceId 查整条调用链日志（Loki，单查询优先、最多 2 次 HTTP，根治超时）。
+
+    推荐优先用本工具替代 obs_log_query+手写 query 来追链路，自动处理：
+    按正文子串匹配 traceId（覆盖 `[xxx]` / `traceId=xxx` / `trace_id: xxx`，
+    不写死字段前缀），带 namespace 限定取全链路按时间排序还原调用链；带 ns 查
+    为 0 时自动降级为不限 namespace 重查一次。ERROR/WARN 行已包含在结果中，
+    meta.error_count / warn_count 给出数量，无需单独再查。
+    防 TOKEN 膨胀（本次新增）：
+    - level：all（默认，全量）/ error（仅 ERROR 级）/ warn（WARN+ERROR 级）。
+      排障时建议先用 level=error 或 level=warn 只取异常行，能省 80%+ token。
+    - clip_len：每条日志行内容截断长度（默认 600，可调小到 200 更省 token）。
+    - meta.truncated：命中行数达到 limit 时为 true，提示结果可能被截断，可调大 limit。
+    默认 region=cn, env=nonprod（对应「test 环境」= namespace=saas-test-new）。
+    注意：手册里「test 环境」在 API 层面对应 env=nonprod（LOKI_DATASOURCES 的 cn
+    只有 prod/nonprod/ops），namespace 由 env 推导：nonprod->saas-test-new、prod->saas-prod。
+    若实际 namespace 不同，请改用 obs_log_query 显式指定 {namespace="..."}。
+    direction：BACKWARD（默认，从最近往回，先看最新）| FORWARD（从最早开始）。
+    """
+    if region not in LOKI_PLATFORMS:
+        return _json({"error": f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）"})
+    try:
+        loki.resolve_datasource(region, env)
+    except loki.LokiError as e:
+        return _json({"error": str(e)})
+
+    start, end = _time_bounds(from_time, to_time, time_range)
+    limit = max(1, min(int(limit), 5000))
+    try:
+        rows, meta = loki.query_trace(
+            region, env, trace_id, start, end, limit, direction,
+            level=level, clip_len=clip_len,
+        )
+    except loki.LokiError as e:
+        return _json({"error": f"{e}{_timeout_hint(start, end)}"})
+
+    def fmt(sec: int) -> str:
+        return datetime.fromtimestamp(sec, BJ).strftime("%Y-%m-%d %H:%M:%S")
+
+    return _json({
+        **meta,
+        "start": fmt(start),
+        "end": fmt(end),
+        "total": len(rows),
+        "results": [{"time": fmt(r["ts_ns"] // 1_000_000_000), "line": r["line"]} for r in rows],
     })
 
 
@@ -127,8 +202,7 @@ def obs_log_datasources(region: str) -> str:
     """列出指定日志平台的 Loki 数据源（用于确认环境名与数据源名映射）。"""
     if region not in LOKI_PLATFORMS:
         return _json({"error": f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）"})
-    client = loki.GrafanaClient(region)
-    client.login()
+    client = loki._get_client(region)
     ds_list = client.discover_loki_datasources()
     return _json({
         "region": region,
