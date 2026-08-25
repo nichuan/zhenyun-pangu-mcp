@@ -17,12 +17,13 @@
 > - 旧的独立 `log-ops` / `sql-ops` / `gitlab-code` MCP 已被本 MCP 整合取代，不再是正式概念，请勿引用。
 >
 > **能力分类**（供 Agent 理解"何时用哪类工具"）：
+> - **认知层（知识/模板/表）**：`search_knowledge` / `get_knowledge` / `search_sql_templates` / `get_sql_template` / `search_tables` / `get_table` / `get_table_relations` / `search_pangu`（统一搜索）/ `diagnose_context`（组合诊断）
 > - **日志能力**：`obs_log_query` / `obs_log_trace` / `obs_log_datasources` / `obs_sls_query`
 > - **数据能力**：`archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances`
 > - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，只读）
 > - **代码能力**：`gitlab_*`（GitLab 仓库：项目/代码/文件/目录/分支）+ `search_repo`（本地跨仓搜索）
 >
-> **只读/写边界（安全）**：本 MCP 全部工具为**只读**（日志查询、Schema/数据查询、猪齿鱼只读、代码检索），Agent 可自主调用。任何 INSERT/UPDATE/DELETE **不在本 MCP 提供**，统一由 Skill 生成 SQL 后交用户人工确认执行，确保写操作走明确风险确认流程。
+> **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼只读、代码检索为**只读**，Agent 可自主调用。任何生产 INSERT/UPDATE/DELETE **不在本 MCP 提供**，统一由 Skill 生成 SQL 后交用户人工确认执行。认知层的 `save_knowledge` / `save_sql_template` 为**知识库写操作**（写入 knowledge_docs / sql_templates 元数据，默认做相似去重），不影响业务数据。
 
 甄云盘古通用工具 MCP，供任意 MCP 客户端（Claude Desktop / Cursor / 各类 agent）复用。
 
@@ -30,10 +31,16 @@
 
 ## 能力总览
 
-工具按前缀分组（共 23 个）：
+工具按前缀/能力分组（共 36 个）：
 
 | 前缀 | 工具 | 说明 |
 |------|------|------|
+| `knowledge`（认知层） | `search_knowledge` / `get_knowledge` | 业务知识/排查经验：混合检索（语义+关键词）+ 详情（整合自 knowledge-ops-mcp） |
+| `template`（行动层） | `search_sql_templates` / `get_sql_template` | 可复用 SQL/修复模板：混合检索 + 详情（整合自 sql-template-mcp） |
+| `table`（事实层） | `search_tables` / `get_table` / `get_table_relations` | 表目录 + 关联关系（整合自 table-catalog-mcp） |
+| `search_pangu` | `search_pangu` | 统一搜索：一次检索 知识 + 模板 + 表 + 关系 |
+| `diagnose_context` | `diagnose_context` | 组合诊断：自动汇集 认知 → 模板 → 表 → 关系 的诊断上下文 |
+| `save_*`（知识库写） | `save_knowledge` / `save_sql_template` | 沉淀知识/模板（默认相似去重，写入元数据不碰业务数据） |
 | `obs_*` | `obs_log_query` / `obs_log_trace` / `obs_log_datasources` / `obs_sls_query` | 日志能力：Loki 双平台（aws 海外全环境 + cn 国内非生产）+ 阿里云 SLS（仅 cn 国内盘古 prod） |
 | `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` | 数据能力（Archery 双站点 cn/aws + 盘古专属租户/库/实例能力） |
 | `choerodon_*` | `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` | 业务系统能力：猪齿鱼协作（内置 Python 客户端，纯 HTTP 登录，只读） |

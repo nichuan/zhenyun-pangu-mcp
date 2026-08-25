@@ -142,3 +142,50 @@ GITLAB_SEARCH_DEFAULT_SCOPE = os.getenv("GITLAB_SEARCH_DEFAULT_SCOPE", "srm")
 # 跨仓代码搜索根目录(纯本地遍历,默认回退到本仓库根,无需外部仓库)
 # ---------------------------------------------------------------------------
 PG_ROOT = os.getenv("PG_ROOT", str(REPO_ROOT))
+
+# ---------------------------------------------------------------------------
+# 知识库 Supabase(知识/模板/表/关系 四张表所在元数据库,不存业务数据)
+# ---------------------------------------------------------------------------
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
+
+def get_supabase_url() -> str:
+    if not SUPABASE_URL:
+        raise RuntimeError("缺少 SUPABASE_URL，请在 .env 配置知识库连接。")
+    return SUPABASE_URL
+
+
+def get_supabase_key() -> str:
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("缺少 SUPABASE_SERVICE_ROLE_KEY，请在 .env 配置知识库连接。")
+    return SUPABASE_SERVICE_ROLE_KEY
+
+
+# 知识表名(默认不变,可覆盖以指向其他元数据库)
+KNOWLEDGE_TABLE = os.getenv("KNOWLEDGE_TABLE", "knowledge_docs")
+SQL_TEMPLATE_TABLE = os.getenv("SQL_TEMPLATE_TABLE", "sql_templates")
+TABLE_CATALOG_TABLE = os.getenv("TABLE_CATALOG_TABLE", "table_catalog")
+TABLE_RELATION_TABLE = os.getenv("TABLE_RELATION_TABLE", "table_relations")
+
+
+# ---------------------------------------------------------------------------
+# 统一 Embedding(NVIDIA 免费模型,2048 维;未配置 key 时检索降级为关键词)
+# ---------------------------------------------------------------------------
+def get_nvidia_api_key() -> str:
+    return os.getenv("NVIDIA_API_KEY", "").strip() or os.getenv("EMBEDDING_API_KEY", "").strip()
+
+
+def get_nvidia_embed_model() -> str:
+    return os.getenv("NVIDIA_EMBED_MODEL", "nvidia/nv-embed-v1").strip()
+
+
+def get_nvidia_embed_url() -> str:
+    return os.getenv("NVIDIA_EMBED_URL", "https://integrate.api.nvidia.com/v1/embeddings").strip()
+
+
+def get_semantic_match_threshold() -> float:
+    try:
+        return float(os.getenv("SEMANTIC_MATCH_THRESHOLD", "0.5"))
+    except ValueError:
+        return 0.5

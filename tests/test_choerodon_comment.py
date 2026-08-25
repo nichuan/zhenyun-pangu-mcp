@@ -131,3 +131,68 @@ def test_list_issue_comments_parses():
 def test_dispatch_has_comment_tools():
     assert "list_comments" in choerodon.CHOERODON_DISPATCH
     assert "create_comment" in choerodon.CHOERODON_DISPATCH
+
+
+# ---------------------------------------------------------------------------
+# 租户编码解析：issueNum 前缀 / 独立字段 / 完整编号
+# ---------------------------------------------------------------------------
+def test_split_issue_num_with_prefix():
+    assert choerodon._split_issue_num("prod-bug-213849") == ("prod-bug", "213849")
+
+
+def test_split_issue_num_plain():
+    assert choerodon._split_issue_num("213849") == ("", "213849")
+
+
+def test_issue_brief_parses_tenant_from_foundation_field():
+    # 真·租户编码来自 foundationFieldValue.pro_code1(与 raycast 一致)
+    # issueNum 前缀 prod-bug 只是编号前缀,不是租户编码
+    it = {
+        "issueId": "enc-1", "issueNum": "prod-bug-213849",
+        "foundationFieldValue": {"pro_code1": "SRM-FLGE"},
+        "summary": "测试缺陷", "statusVO": {"name": "进行中"},
+        "typeCode": "bug", "issueTypeVO": {"name": "缺陷"},
+        "priorityVO": {"name": "高"}, "createUser": {"name": "张三"},
+    }
+    brief = choerodon._issue_brief(it)
+    assert brief["tenantCode"] == "SRM-FLGE"
+    assert brief["fullIssueNum"] == "prod-bug-213849"
+    assert brief["issueNum"] == "prod-bug-213849"
+
+
+def test_issue_brief_falls_back_to_independent_field():
+    # 若 API 另有独立 organizationCode 字段,优先用它
+    it = {"issueId": "enc-2", "issueNum": "100", "organizationCode": "prod", "projectCode": "bug"}
+    brief = choerodon._issue_brief(it)
+    assert brief["tenantCode"] == "prod"
+    assert brief["projectCode"] == "bug"
+
+
+def test_issue_brief_no_tenant_returns_empty():
+    it = {"issueId": "enc-3", "issueNum": "55"}
+    brief = choerodon._issue_brief(it)
+    assert brief["tenantCode"] == ""
+    assert brief["fullIssueNum"] == "55"
+
+
+def test_get_issue_detail_carries_tenant_fields():
+    # 详情接口不返回 foundationFieldValue,应反查 work_list 回填 tenantCode
+    def fake_request(method, path, *, params=None, json_body=None, data=None, timeout=30):
+        if method == "GET" and "/issues/" in path:
+            return {
+                "issueId": "enc-9", "issueNum": "prod-bug-213849", "summary": "x",
+                "statusVO": {}, "issueTypeVO": {}, "priorityVO": {},
+                "issueAttachmentVOList": [],
+            }
+        # 反查 work_list 返回带 foundationFieldValue 的列表项
+        return {
+            "content": [{
+                "issueId": "enc-9", "issueNum": "prod-bug-213849",
+                "foundationFieldValue": {"pro_code1": "SRM-FLGE"},
+            }]
+        }
+
+    with mock.patch.object(choerodon, "_request", side_effect=fake_request):
+        detail = choerodon.get_issue_detail("enc-9", project_id="58")
+    assert detail["tenantCode"] == "SRM-FLGE"
+    assert detail["fullIssueNum"] == "prod-bug-213849"

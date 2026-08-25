@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import archery, choerodon, loki, search, sls, sls_config, gitlab
 from .config import ARCHERY_INSTANCE_ALIASES, ARCHERY_DEFAULT_DB, LOKI_PLATFORMS
+from .knowledge_base import service as kb
 
 mcp = FastMCP("zhenyun-pangu-mcp")
 BJ = timezone(timedelta(hours=8))
@@ -347,7 +348,8 @@ def choerodon_query_issue(issue_id: str, project_id: str = "") -> str:
     """查询猪齿鱼单个任务/缺陷详情（含附件列表）。
 
     issue_id 为工单加密 ID（来自列表结果）；project_id 可选,默认用 CHOERODON_PROJECT_ID。
-    返回 summary/状态/优先级/类型/创建人/描述(HTML)/附件。
+    返回 issueNum/完整编号 fullIssueNum(如 prod-bug-213849)/租户编码 tenantCode/项目编码 projectCode/
+    summary/状态/优先级/类型/创建人/描述(HTML)/附件。
     """
     return _choerodon_call("query_issue", issue_id=issue_id, project_id=project_id or None)
 
@@ -627,6 +629,228 @@ def obs_sls_query(
         })
     except (ValueError, RuntimeError) as e:
         return _json({"error": str(e)})
+
+
+# ============================================================================
+# 知识库「认知层」能力（整合 self sql-template-mcp / knowledge-ops-mcp / table-catalog-mcp）
+# 工具语义化分层：Discovery / Context / Composite / Action
+# ============================================================================
+
+# ---- Discovery：让 Agent 找东西 ----
+@mcp.tool()
+def search_knowledge(
+    query: str = "",
+    knowledge_type: str = "",
+    system: str = "",
+    module: str = "",
+    status: str = "",
+    verified_only: bool = False,
+    limit: int = 10,
+    use_semantic: bool = True,
+) -> str:
+    """检索业务知识/排查经验（混合检索：语义向量 + 关键词，综合排序）。
+
+    排障/写 SQL 前先检索是否已有认知沉淀。可按 类型/系统/模块/状态 过滤。
+    """
+    return kb.search_knowledge(query, knowledge_type, system, module, status, verified_only, limit, use_semantic)
+
+
+@mcp.tool()
+def search_sql_templates(
+    keyword: str = "",
+    category: str = "",
+    system: str = "",
+    business_domain: str = "",
+    verified_only: bool = False,
+    limit: int = 10,
+    use_semantic: bool = True,
+) -> str:
+    """检索可复用的 SQL/修复模板（混合检索）。生成 SQL 前先调用，形成闭环。"""
+    return kb.search_sql_templates(keyword, category, system, business_domain, verified_only, limit, use_semantic)
+
+
+@mcp.tool()
+def search_tables(
+    query: str,
+    domain: str = "",
+    db_name: str = "",
+    top_k: int = 5,
+    use_semantic: bool = True,
+) -> str:
+    """按关键词/语义检索表目录（table_catalog），返回表注释、关键字段等机器事实。"""
+    return kb.search_tables(query, domain, db_name, top_k, use_semantic)
+
+
+@mcp.tool()
+def search_pangu(query: str, system: str = "", module: str = "", category: str = "", top_k: int = 3) -> str:
+    """统一搜索：一次同时检索 知识 + 模板 + 表 + 相关关系，适合快速发现；精准检索请用专项工具。"""
+    return kb.search_pangu(query, system, module, category, top_k)
+
+
+# ---- Context：获取完整上下文 ----
+@mcp.tool()
+def get_knowledge(doc_id: int) -> str:
+    """按 id 获取单条知识的完整正文。"""
+    return kb.get_knowledge(doc_id)
+
+
+@mcp.tool()
+def get_sql_template(template_id: int) -> str:
+    """按 id 获取单条 SQL 模板的完整内容（含执行过程与示例）。"""
+    return kb.get_sql_template(template_id)
+
+
+@mcp.tool()
+def get_table(table_name: str, db_name: str = "") -> str:
+    """获取单张表的元数据详情（表注释/描述/关键字段/入口字段）。"""
+    return kb.get_table(table_name, db_name)
+
+
+@mcp.tool()
+def get_table_relations(table_name: str) -> str:
+    """获取某张表已沉淀的关联关系（join 路径 + 关系语义 + 置信度）。"""
+    return kb.get_table_relations(table_name)
+
+
+# ---- Composite：组合诊断 ----
+@mcp.tool()
+def diagnose_context(query: str, system: str = "", module: str = "", limit: int = 3) -> str:
+    """组合诊断：针对一个业务问题，自动汇集 认知 → 行动模板 → 相关表 → 表关系 的诊断上下文。
+
+    内部自动完成 knowledge→template→table→relation 的多层检索，返回统一诊断上下文。
+    """
+    return kb.diagnose_context(query, system, module, limit)
+
+
+# ---- Action：写权限（谨慎暴露；默认需显式确认/去重） ----
+@mcp.tool()
+def save_knowledge(
+    title: str,
+    content_md: str,
+    knowledge_type: str = "business",
+    system: str = "",
+    module: str = "",
+    summary: str = "",
+    core_tables: str = "",
+    related_template_ids: str = "",
+    tags: str = "",
+    status: str = "draft",
+    source_type: str = "manual",
+    created_by: str = "",
+    skip_dup_check: bool = False,
+) -> str:
+    """沉淀一条知识到知识库（写操作）。默认会做相似去重，跳过需 skip_dup_check=true。"""
+    return kb.save_knowledge(
+        title, content_md, knowledge_type, system, module, summary,
+        core_tables, related_template_ids, tags, status, source_type, created_by, skip_dup_check,
+    )
+
+
+@mcp.tool()
+def save_sql_template(
+    title: str,
+    category: str,
+    scenario: str,
+    sql_text: str,
+    keywords: str = "",
+    core_tables: str = "",
+    verified: bool = False,
+    template_no: str = "",
+    system: str = "",
+    status: str = "draft",
+    risk_level: str = "LOW",
+    business_domain: str = "",
+    source_type: str = "generated",
+    parameters: str = "",
+    execution_policy: str = "",
+    created_by: str = "",
+    skip_dup_check: bool = False,
+) -> str:
+    """沉淀一条可复用 SQL/修复模板（写操作）。parameters 传 JSON 字符串存为 JSONB。"""
+    return kb.save_sql_template(
+        title, category, scenario, sql_text, keywords, core_tables, verified, template_no,
+        system, status, risk_level, business_domain, source_type, parameters,
+        execution_policy, created_by, skip_dup_check,
+    )
+
+
+@mcp.tool()
+def list_sql_templates(
+    category: str = "",
+    system: str = "",
+    business_domain: str = "",
+    verified_only: bool = False,
+    limit: int = 50,
+) -> str:
+    """列出模板库中的模板（可按分类/系统/业务域/验证状态过滤），用于总览与维护。"""
+    return kb.list_sql_templates(category, system, business_domain, verified_only, limit)
+
+
+@mcp.tool()
+def update_sql_template(
+    template_id: int,
+    title: str = "",
+    scenario: str = "",
+    sql_text: str = "",
+    category: str = "",
+    system: str = "",
+    status: str = "",
+    risk_level: str = "",
+    business_domain: str = "",
+    keywords: str = "",
+    core_tables: str = "",
+    parameters: str = "",
+    execution_policy: str = "",
+    source_type: str = "",
+    verified: bool = False,
+) -> str:
+    """更新已有模板字段（写操作；补充验证标记/修正 SQL/调整分类风险）。"""
+    return kb.update_sql_template(
+        template_id, title, scenario, sql_text, category, system, status, risk_level,
+        business_domain, keywords, core_tables, parameters, execution_policy,
+        source_type, verified,
+    )
+
+
+@mcp.tool()
+def delete_sql_template(template_id: int) -> str:
+    """删除指定模板（写操作，仅维护场景使用）。"""
+    return kb.delete_sql_template(template_id)
+
+
+@mcp.tool()
+def record_template_usage(template_id: int) -> str:
+    """模板被复用后累加使用次数。"""
+    return kb.record_template_usage(template_id)
+
+
+@mcp.tool()
+def add_table_relation(
+    from_table: str,
+    to_table: str,
+    join_on: str,
+    relation_type: str = "ref",
+    description: str = "",
+    confidence: float = 1.0,
+    from_db: str = "srm",
+    to_db: str = "srm",
+) -> str:
+    """沉淀一条经过 SQL 验证的表关联关系（写操作，upsert 去重）。"""
+    return kb.add_table_relation(from_table, to_table, join_on, relation_type, description, confidence, from_db, to_db)
+
+
+@mcp.tool()
+def record_table_usage(table_names: str) -> str:
+    """记录表被使用（自进化权重），table_names 逗号分隔。"""
+    return kb.record_table_usage(table_names)
+
+
+@mcp.tool()
+def upsert_table_knowledge(
+    table_name: str, description: str = "", tags: str = "", db_name: str = "",
+) -> str:
+    """修正/补录单表元数据描述与标签（写操作，upsert）。"""
+    return kb.upsert_table_knowledge(table_name, description, tags, db_name)
 
 
 def main() -> None:

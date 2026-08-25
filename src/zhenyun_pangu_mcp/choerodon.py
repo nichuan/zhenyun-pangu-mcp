@@ -210,10 +210,15 @@ def _request(method: str, path: str, *, params: Optional[dict] = None,
     if resp.status_code == 401:
         _clear_token_cache()
         resp = do(get_access_token())
-    if resp.status_code != 200:
+    # 2xx 均视为成功:200 OK / 201 Created(POST 创建) / 204 No Content 等。
+    # 注意:猪齿鱼创建类接口常返回 201,此前误把非 200 当失败,导致"实际成功却报错"。
+    if not (200 <= resp.status_code < 300):
         raise ChoerodonError(
             f"API 请求失败 {resp.status_code} {method} {path}: {resp.text[:300]}"
         )
+    # 204/无响应体时无法解析 JSON,直接返回空 dict
+    if not resp.content or not resp.text.strip():
+        return {}
     try:
         return resp.json()
     except ValueError as e:
@@ -235,6 +240,65 @@ def _list(data: Any) -> list:
 # ---------------------------------------------------------------------------
 
 
+def _split_issue_num(issue_num: str) -> tuple[str, str]:
+    """从完整任务编号拆分出 (前缀, 纯数字任务号),仅用于兜底展示。
+
+    猪齿鱼敏捷项目的 issueNum 常见两种形态:
+      1. 带前缀: 如 'prod-bug-213849' -> ('prod-bug', '213849')
+      2. 纯数字: 如 '213849'          -> ('', '213849')
+    注意: 这里的 '前缀' 是编号前缀(项目+租户短码),并非权威租户编码。
+    权威租户编码应取 foundationFieldValue.pro_code1(见 _tenant_code)。
+    """
+    s = str(issue_num or "").strip()
+    if not s:
+        return "", ""
+    if "-" in s:
+        head, _, tail = s.rpartition("-")
+        if head and tail.isdigit():
+            return head, tail
+    return "", s
+
+
+def _tenant_code(it: dict) -> str:
+    """真正的租户编码(与 raycast 插件一致,取自 foundationFieldValue.pro_code1)。
+
+    work_list 列表接口的原始响应里带有 foundationFieldValue.pro_code1(如 'SRM-FLGE'),
+    这才是猪齿鱼任务上可查到的'租户编码'。详情接口 issues/{id} 不返回该字段,
+    需由调用方在列表阶段取得后带入。这里做多层兼容回退:
+      1. foundationFieldValue.pro_code1 (权威,raycast 同款)
+      2. 独立 organizationCode / tenantCode 字段
+    """
+    ffv = it.get("foundationFieldValue") or {}
+    if isinstance(ffv, dict):
+        pro_code1 = str(ffv.get("pro_code1") or "").strip()
+        if pro_code1:
+            return pro_code1
+    independent = str(it.get("organizationCode") or it.get("tenantCode") or "").strip()
+    return independent
+
+
+def _proj_code(it: dict) -> str:
+    return str(it.get("projectCode") or "").strip()
+
+
+def _full_issue_num(it: dict) -> str:
+    """返回用户在猪齿鱼页面上看到的人类可读完整任务编号(如 'prod-bug-213849')。
+
+    work_list 返回的 issueNum 通常已是完整编号(含前缀),直接采用;
+    若为纯数字则尝试用租户/项目编码拼接前缀兜底。
+    """
+    num = str(it.get("issueNum") or "").strip()
+    if num and "-" in num:
+        return num  # 已是完整编号(如 prod-bug-213849)
+    org = _tenant_code(it)
+    proj = _proj_code(it)
+    pure = _split_issue_num(num)[1]
+    prefix = "-".join(p for p in (org, proj) if p)
+    if not prefix:
+        return pure or num
+    return f"{prefix}-{pure}" if pure else prefix
+
+
 def _issue_brief(it: dict) -> dict:
     status = (it.get("statusVO") or {})
     itype = (it.get("issueTypeVO") or {})
@@ -243,6 +307,9 @@ def _issue_brief(it: dict) -> dict:
     return {
         "issueId": str(it.get("issueId") or ""),
         "issueNum": str(it.get("issueNum") or ""),
+        "fullIssueNum": _full_issue_num(it),
+        "tenantCode": _tenant_code(it),
+        "projectCode": _proj_code(it),
         "summary": str(it.get("summary") or ""),
         "statusName": str(status.get("name") or ""),
         "typeCode": str(it.get("typeCode") or ""),
@@ -282,6 +349,10 @@ def get_issue_detail(issue_id: str, project_id: str | None = None) -> dict:
     """工单详情(含附件列表;描述保留原始 HTML)。
 
     issue_id 为加密 id(base64,含 '=' 填充符),不能 URL 编码,否则服务端解密失败。
+
+    租户编码(tenantCode)的权威来源是 work_list 列表接口的 foundationFieldValue.pro_code1,
+    但本详情接口(issues/{id})不返回该字段。因此先尝试从详情响应自身取;
+    取不到时,用详情返回的完整 issueNum 反查 work_list 回填,确保与列表/raycast 一致。
     """
     pid = project_id or DEFAULT_PROJECT_ID
     path = f"/agile/v1/projects/{pid}/issues/{issue_id}" \
@@ -299,9 +370,24 @@ def get_issue_detail(issue_id: str, project_id: str | None = None) -> dict:
         {"fileName": str(a.get("fileName") or ""), "url": str(a.get("url") or "")}
         for a in (data.get("issueAttachmentVOList") or [])
     ]
+    tenant_code = _tenant_code(data)
+    if not tenant_code:
+        # 详情接口不返回 foundationFieldValue,用完整 issueNum 反查 work_list 回填
+        issue_num = str(data.get("issueNum") or "")
+        if issue_num:
+            try:
+                for it in search_issues(keyword=issue_num, size=20, project_id=pid):
+                    if it.get("issueNum") == issue_num and it.get("tenantCode"):
+                        tenant_code = it["tenantCode"]
+                        break
+            except Exception:
+                pass
     return {
         "issueId": str(data.get("issueId") or issue_id),
         "issueNum": str(data.get("issueNum") or ""),
+        "fullIssueNum": _full_issue_num(data),
+        "tenantCode": tenant_code,
+        "projectCode": _proj_code(data),
         "summary": str(data.get("summary") or ""),
         "statusName": str(status.get("name") or ""),
         "typeCode": str(data.get("typeCode") or ""),
@@ -515,9 +601,11 @@ def create_issue_comment(issue_id: str, comment: str, project_id: str | None = N
     if not detail or not detail.get("issueId"):
         raise ChoerodonError(f"任务不存在或无法访问: {issue_id}")
     body = {"issueId": issue_id, "commentText": html_content}
-    _request("POST", f"/agile/v1/projects/{pid}/issue_comment", json_body=body)
+    result = _request("POST", f"/agile/v1/projects/{pid}/issue_comment", json_body=body) or {}
+    comment_id = str(result.get("commentId") or "")
     return {
         "ok": True,
+        "commentId": comment_id,
         "issueId": issue_id,
         "issueNum": detail.get("issueNum", ""),
         "summary": detail.get("summary", ""),
