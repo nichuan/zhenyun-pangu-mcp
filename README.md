@@ -1,14 +1,14 @@
 # zhenyun-pangu-mcp
 
-> ## 架构定位：盘古「实时世界接口」
+> ## 架构定位：盘古「实时接口」
 >
 > 在四层架构中，本 MCP 是 **Knowledge / Skill / Template 之外的唯一"实时事实"来源**：
 >
 > | 层 | 回答什么 | 载体 |
 > |---|---|---|
 > | **Skill** | 这个任务应该怎么做 | `custom-skills/` 的 SKILL.md（编排流程） |
-> | **Knowledge** | 业务/系统/字段**是什么** | `references/*.md`、`table-catalog-mcp`（稳定事实） |
-> | **Template** | 以前类似问题**怎么解决** | `sql-template-mcp`（历史经验） |
+> | **Knowledge** | 业务/系统/字段**是什么** | 本 MCP 的 `knowledge_base/`（稳定事实，沉淀于 knowledge_docs） |
+> | **Template** | 以前类似问题**怎么解决** | 本 MCP 的 `knowledge_base/`（SQL 模板，沉淀于 sql_templates） |
 > | **zhenyun-pangu-mcp** | **现在**生产环境真实**是什么/发生了什么** | 本 MCP（日志 / 数据 / 猪齿鱼 / 代码） |
 >
 > **边界原则**：
@@ -20,10 +20,10 @@
 > - **认知层（知识/模板/表）**：`search_knowledge` / `get_knowledge` / `search_sql_templates` / `get_sql_template` / `search_tables` / `get_table` / `get_table_relations` / `search_pangu`（统一搜索）/ `diagnose_context`（组合诊断）
 > - **日志能力**：`obs_log_query` / `obs_log_trace` / `obs_log_datasources` / `obs_sls_query`
 > - **数据能力**：`archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances`
-> - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，只读）
+> - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，以只读查询为主，`choerodon_add_comment` 为需确认的写操作）
 > - **代码能力**：`gitlab_*`（GitLab 仓库：项目/代码/文件/目录/分支）+ `search_repo`（本地跨仓搜索）
 >
-> **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼只读、代码检索为**只读**，Agent 可自主调用。任何生产 INSERT/UPDATE/DELETE **不在本 MCP 提供**，统一由 Skill 生成 SQL 后交用户人工确认执行。认知层的 `save_knowledge` / `save_sql_template` 为**知识库写操作**（写入 knowledge_docs / sql_templates 元数据，默认做相似去重），不影响业务数据。
+> **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼查询类（`choerodon_*_issue` / `choerodon_list_*` / `choerodon_search_*` / `choerodon_get_*` / `choerodon_download_*`）、代码检索为**只读**，Agent 可自主调用。任何生产 INSERT/UPDATE/DELETE **不在本 MCP 提供**，统一由 Skill 生成 SQL 后交用户人工确认执行。认知层写操作：`save_knowledge` / `save_sql_template` / `update_sql_template` / `list_sql_templates`（写入 knowledge_docs / sql_templates 元数据，默认相似去重），不影响业务数据；其中 `choerodon_add_comment` 与 `update_sql_template` 会真实写入外部系统（猪齿鱼评论 / 模板库），调用前必须向用户确认内容。
 
 甄云盘古通用工具 MCP，供任意 MCP 客户端（Claude Desktop / Cursor / 各类 agent）复用。
 
@@ -31,20 +31,20 @@
 
 ## 能力总览
 
-工具按前缀/能力分组（共 36 个）：
+工具按前缀/能力分组（共 38 个）：
 
 | 前缀 | 工具 | 说明 |
 |------|------|------|
-| `knowledge`（认知层） | `search_knowledge` / `get_knowledge` | 业务知识/排查经验：混合检索（语义+关键词）+ 详情（整合自 knowledge-ops-mcp） |
-| `template`（行动层） | `search_sql_templates` / `get_sql_template` | 可复用 SQL/修复模板：混合检索 + 详情（整合自 sql-template-mcp） |
-| `table`（事实层） | `search_tables` / `get_table` / `get_table_relations` | 表目录 + 关联关系（整合自 table-catalog-mcp） |
+| `knowledge`（认知层） | `search_knowledge` / `get_knowledge` | 业务知识/排查经验：混合检索（语义+关键词）+ 详情（沉淀于 knowledge_docs） |
+| `template`（行动层） | `search_sql_templates` / `get_sql_template` / `list_sql_templates` | 可复用 SQL/修复模板：混合检索 + 详情 + 总览（沉淀于 sql_templates） |
+| `table`（事实层） | `search_tables` / `get_table` / `get_table_relations` | 表目录 + 关联关系（沉淀于 table_catalog / table_relations） |
 | `search_pangu` | `search_pangu` | 统一搜索：一次检索 知识 + 模板 + 表 + 关系 |
 | `diagnose_context` | `diagnose_context` | 组合诊断：自动汇集 认知 → 模板 → 表 → 关系 的诊断上下文 |
-| `save_*`（知识库写） | `save_knowledge` / `save_sql_template` | 沉淀知识/模板（默认相似去重，写入元数据不碰业务数据） |
+| `save_*` / `update_*`（知识库写） | `save_knowledge` / `save_sql_template` / `update_sql_template` | 沉淀/更新知识模板（默认相似去重，写入元数据不碰业务数据；`update_sql_template` 为写操作） |
 | `obs_*` | `obs_log_query` / `obs_log_trace` / `obs_log_datasources` / `obs_sls_query` | 日志能力：Loki 双平台（aws 海外全环境 + cn 国内非生产）+ 阿里云 SLS（仅 cn 国内盘古 prod） |
 | `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` | 数据能力（Archery 双站点 cn/aws + 盘古专属租户/库/实例能力） |
-| `choerodon_*` | `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` | 业务系统能力：猪齿鱼协作（内置 Python 客户端，纯 HTTP 登录，只读） |
-| `gitlab_*` | `gitlab_search_projects` / `gitlab_search_code` / `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 代码能力：GitLab 仓库（项目 / 代码 / 文件 / 目录 / 分支，整合自 gitlab-code-mcp） |
+| `choerodon_*` | `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_add_comment` | 业务系统能力：猪齿鱼协作（内置 Python 客户端，纯 HTTP 登录；前 7 个为只读查询，`choerodon_add_comment` 为写操作，需确认） |
+| `gitlab_*` | `gitlab_search_projects` / `gitlab_search_code` / `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 代码能力：GitLab 仓库（项目 / 代码 / 文件 / 目录 / 分支） |
 | `search_repo` | `search_repo` | 代码能力：跨本地代码仓库搜索（内容 / 文件名 / 模块结构） |
 
 ## 日志平台区分（重要）
