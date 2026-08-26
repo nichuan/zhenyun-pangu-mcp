@@ -3,11 +3,13 @@
 使用 csrftoken + sessionid 认证模型（双站点 cn/aws），
 覆盖盘古专属能力：租户查询、实例列表、环境映射。
 
-只读安全：仅放行 SELECT/SHOW/DESC/EXPLAIN/WITH 前缀，写操作拦截。
+只读安全：用户可执行的 SQL 仅允许单条基础 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE，
+写操作及高级语法拦截。
 """
 from __future__ import annotations
 
 import os
+import re
 
 import requests
 from requests.exceptions import RequestException
@@ -25,13 +27,119 @@ class ArcheryError(Exception):
     """Archery 查询/认证错误。"""
 
 
-# 只读语句前缀
-_READ_PREFIXES = ("select", "show", "explain", "with", "desc", "describe", "use ", "pragma")
+# Archery 用户查询只支持最基本的单条只读语句：SELECT、EXPLAIN SELECT、
+# SHOW CREATE TABLE。
+#
+# 这里不使用字符串前缀白名单之外的“放行”策略：仅检查 startswith 会让
+# `SELECT ...; DELETE ...`、`WITH ... DELETE ...` 等语句绕过只读边界。
+_UNSUPPORTED_SQL_TOKENS = (
+    "insert", "update", "delete", "replace", "merge", "upsert", "drop", "alter",
+    "create", "truncate", "grant", "revoke", "call", "execute", "set", "use",
+    "show", "describe", "explain", "with", "union", "intersect", "except",
+    "over", "partition", "window", "procedure", "function", "trigger", "into", "outfile",
+    "dumpfile", "for", "lock", "case", "when", "then", "else", "end",
+)
+
+
+def _sql_code(sql: str) -> str:
+    """返回 SQL 的非字符串部分，同时拒绝注释和多语句。
+
+    仅用于安全边界校验，不是完整 SQL parser；字符串中的关键字/分号不会被
+    误判，字符串外的注释、括号和语句分隔符则一律拒绝。
+    """
+    if not isinstance(sql, str) or not sql.strip():
+        raise ArcheryError("SQL 不能为空")
+
+    code: list[str] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        # SQL 字符串和带引号标识符：跳过内容，但保留空格以避免关键字粘连。
+        if ch in ("'", '"', "`"):
+            quote = ch
+            i += 1
+            while i < n:
+                if sql[i] == "\\" and quote != "`":
+                    i += 2
+                    continue
+                if sql[i] == quote:
+                    # SQL 用两个引号表示一个引号：'' / "" / ``。
+                    if i + 1 < n and sql[i + 1] == quote:
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            else:
+                raise ArcheryError("SQL 包含未闭合的引号")
+            # 保留反引号标识符的占位符，便于校验 SHOW CREATE TABLE 的表名；
+            # 字符串内容仍完全抹去，避免其中的关键字参与语法判断。
+            code.append("__quoted_identifier__" if quote == "`" else " ")
+            continue
+        # 注释会隐藏后续语句或改变 WHERE 语义，用户 SQL 一律不允许。
+        if sql.startswith("--", i) or ch == "#" or sql.startswith("/*", i):
+            raise ArcheryError("不允许使用 SQL 注释")
+        if ch == ";":
+            # 允许一个末尾语句 terminator，除此之外均视为多语句。
+            if sql[i + 1 :].strip():
+                raise ArcheryError("仅允许单条只读 SQL，不能包含多条语句")
+            code.append(" ")
+            i += 1
+            continue
+        if ch in "()":
+            raise ArcheryError("仅支持基础只读 SQL，不支持函数、子查询或窗口表达式")
+        code.append(ch)
+        i += 1
+    return "".join(code)
+
+
+def validate_select_sql(sql: str) -> None:
+    """校验用户 SQL 必须是单条基础只读语句。
+
+    允许基础 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE；SELECT 支持常见的
+    列/表/WHERE/ORDER BY/GROUP BY/LIMIT 等语法。不允许 CTE、集合运算、窗口函数、
+    函数/子查询括号、DDL/DML、注释和多语句。
+
+    函数名保留为历史名称，调用方无需修改。
+    """
+    code = _sql_code(sql)
+    normalized = " ".join(code.strip().lower().split())
+    is_select = normalized == "select" or normalized.startswith("select ")
+    is_explain_select = normalized == "explain select" or normalized.startswith("explain select ")
+    show_prefix = "show create table"
+    is_show_create = normalized.startswith(show_prefix + " ")
+
+    if is_show_create:
+        # 只允许 SHOW CREATE TABLE 加一个简单表名（可带 schema，或使用反引号标识符）。
+        # _sql_code 将反引号标识符替换为占位符，避免表名中的关键字被误判。
+        table_name = normalized[len(show_prefix) + 1 :]
+        identifier = r"(?:[a-zA-Z_][a-zA-Z0-9_$-]*|__quoted_identifier__)"
+        if not re.fullmatch(rf"{identifier}(?:\.{identifier})?", table_name):
+            raise ArcheryError("SHOW CREATE TABLE 后必须是单个表名")
+        return
+
+    if not is_select and not is_explain_select:
+        raise ArcheryError(
+            "仅允许执行基础 SELECT、EXPLAIN SELECT 或 SHOW CREATE TABLE"
+        )
+
+    # EXPLAIN 只允许解释 SELECT，不能借此包装 UPDATE/DELETE 等写操作。
+    statement = normalized[len("explain ") :] if is_explain_select else normalized
+    for token in _UNSUPPORTED_SQL_TOKENS:
+        if re.search(rf"\b{token}\b", statement):
+            raise ArcheryError(
+                f"不支持的 SQL 语法：{token.upper()}（仅允许基础 SELECT、EXPLAIN SELECT 或 SHOW CREATE TABLE）"
+            )
 
 
 def is_write_sql(sql: str) -> bool:
-    s = " ".join(sql.strip().lower().split())
-    return not s.startswith(_READ_PREFIXES)
+    """兼容旧调用方：非法/非基础只读 SQL 均视为不可执行。"""
+    try:
+        validate_select_sql(sql)
+    except ArcheryError:
+        return True
+    return False
 
 
 class ArcheryClient:
@@ -105,9 +213,19 @@ class ArcheryClient:
         return payload
 
     # ---------- SQL 查询 ----------
-    def query(self, sql: str, instance_name: str, db_name: str, limit_num: int = 100) -> dict:
-        if is_write_sql(sql):
-            raise ArcheryError(f"拒绝执行写操作 SQL（仅允许 SELECT/SHOW/DESC/EXPLAIN）: {sql[:80]}")
+    def query(
+        self,
+        sql: str,
+        instance_name: str,
+        db_name: str,
+        limit_num: int = 100,
+        *,
+        _internal_allow_non_select: bool = False,
+    ) -> dict:
+        # 只有固定的内部“列数据库”能力可以走 SHOW DATABASES；用户传入的
+        # archery_query 永远使用默认 False，不能通过 SQL 文本绕过此边界。
+        if not _internal_allow_non_select:
+            validate_select_sql(sql)
         self.authenticate()
         url = urljoin(self.base_url + "/", "query/")
         data = {
@@ -250,9 +368,15 @@ def query_tenant(site: str, tenant: str | None, instance_name: str, db_name: str
     """查询 hpfm_tenant 租户信息。"""
     client = _client(site)
     if tenant:
+        tenant = tenant.strip()
+        # 该能力的 SQL 由服务端内部拼接，租户号/名称只接受常见业务编码字符，
+        # 避免引号、注释和控制字符改变查询语义。
+        if not re.fullmatch(r"[\w .:/-]{1,100}", tenant, flags=re.UNICODE):
+            raise ArcheryError("tenant 仅允许字母、数字、空格及 . : / - _ 字符")
+        escaped = tenant.replace("\\", "\\\\").replace("'", "''")
         sql = (
             f"SELECT tenant_id, tenant_num, tenant_name, enabled_flag "
-            f"FROM hpfm_tenant WHERE tenant_num = '{tenant}' OR tenant_name LIKE '%{tenant}%' LIMIT 50"
+            f"FROM hpfm_tenant WHERE tenant_num = '{escaped}' OR tenant_name LIKE '%{escaped}%' LIMIT 50"
         )
     else:
         sql = "SELECT tenant_id, tenant_num, tenant_name, enabled_flag FROM hpfm_tenant LIMIT 100"
@@ -262,4 +386,9 @@ def query_tenant(site: str, tenant: str | None, instance_name: str, db_name: str
 def query_db_list(site: str, instance_name: str) -> dict:
     """查询实例下的数据库列表（SHOW DATABASES）。"""
     client = _client(site)
-    return client.query("SHOW DATABASES", instance_name, "", 1000)
+    # 这是 MCP 内部固定能力，不暴露为用户可执行 SQL；用户传入的
+    # archery_query 仍然只能执行基础 SELECT / EXPLAIN SELECT / SHOW CREATE TABLE。
+    return client.query(
+        "SHOW DATABASES", instance_name, "", 1000,
+        _internal_allow_non_select=True,
+    )

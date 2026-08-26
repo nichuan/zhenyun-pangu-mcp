@@ -19,23 +19,23 @@ from zhenyun_pangu_mcp import choerodon  # noqa: E402
 # _to_html_comment / _md_to_html：Markdown -> HTML
 # ---------------------------------------------------------------------------
 def test_to_html_comment_plain_text():
-    html = choerodon._to_html_comment("你好，问题已修复")
-    assert html == "<p>你好，问题已修复</p>"
+    html = choerodon._to_html_comment("**处理结果**：问题已修复")
+    assert html == "<p><b>处理结果</b>：问题已修复</p>"
 
 
 def test_to_html_comment_multiline_paragraphs():
-    html = choerodon._to_html_comment("第一行\n第二行")
-    assert html == "<p>第一行</p>\n<p>第二行</p>"
+    html = choerodon._to_html_comment("**处理结果**\n第二行")
+    assert html == "<p><b>处理结果</b></p>\n<p>第二行</p>"
 
 
-def test_to_html_comment_escapes_html_special():
-    html = choerodon._to_html_comment("a<b> & c>d")
-    assert "<b>" not in html  # 尖括号被转义，不会作为标签注入
+def test_to_html_comment_rejects_raw_html():
+    with pytest.raises(choerodon.ChoerodonError, match="Markdown"):
+        choerodon._to_html_comment("**结果** <b>已修复</b>")
 
 
-def test_to_html_comment_passthrough_html():
-    html = choerodon._to_html_comment("<p>已转 HTML</p>")
-    assert html == "<p>已转 HTML</p>"
+def test_to_html_comment_rejects_plain_text():
+    with pytest.raises(choerodon.ChoerodonError, match="规范 Markdown"):
+        choerodon._to_html_comment("问题已修复")
 
 
 def test_to_html_comment_empty_raises():
@@ -62,8 +62,25 @@ def test_md_to_html_unordered_list():
 
 def test_md_to_html_code_block():
     html = choerodon._to_html_comment("```sql\nSELECT 1;\n```")
-    assert "<pre><code>" in html
+    assert '<pre><code class="language-sql">' in html
     assert "SELECT 1;" in html
+
+
+def test_md_to_html_code_block_preserves_language_and_closing_boundary():
+    html = choerodon._to_html_comment("```text\n```inside\nvalue\n```\n\n**完成**")
+    assert '<pre><code class="language-text">```inside\nvalue</code></pre>' in html
+    assert "<b>完成</b>" in html
+
+
+def test_md_to_html_table():
+    html = choerodon._to_html_comment(
+        "| 字段 | 值 |\n| :--- | ---: |\n| 状态 | **正常** |"
+    )
+    assert "<table>" in html
+    assert "<thead>" in html and "<tbody>" in html
+    assert '<th align="left">字段</th>' in html
+    assert '<th align="right">值</th>' in html
+    assert '<td align="right"><b>正常</b></td>' in html
 
 
 def test_md_to_html_quote():
@@ -89,14 +106,14 @@ def test_create_issue_comment_posts_json():
 
     with mock.patch.object(choerodon, "_request", side_effect=fake_request), \
          mock.patch.object(choerodon, "get_issue_detail", side_effect=fake_detail):
-        res = choerodon.create_issue_comment("encrypted-id", "你好，已处理", project_id="999")
+        res = choerodon.create_issue_comment("encrypted-id", "## 处理结果\n\n问题已修复", project_id="999")
 
     assert res["ok"] is True
     assert res["issueNum"] == "apaas-123"
     assert calls["method"] == "POST"
     assert "/issue_comment" in calls["path"]
     assert calls["body"]["issueId"] == "encrypted-id"
-    assert calls["body"]["commentText"] == "<p>你好，已处理</p>"
+    assert calls["body"]["commentText"] == "<h2>处理结果</h2>\n<p>问题已修复</p>"
 
 
 def test_create_issue_comment_target_not_found_raises():

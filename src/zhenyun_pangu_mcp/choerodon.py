@@ -485,18 +485,106 @@ def _inline_md(s: str) -> str:
     return s
 
 
+def _split_table_row(line: str) -> list[str] | None:
+    """拆分 Markdown 管道表格的一行，支持反斜杠转义和代码 span 内的管道符。"""
+    raw = line.strip()
+    if "|" not in raw:
+        return None
+    if raw.startswith("|"):
+        raw = raw[1:]
+    if raw.endswith("|") and not raw.endswith("\\|"):
+        raw = raw[:-1]
+
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    in_code = False
+    for ch in raw:
+        if escaped:
+            current.append(ch)
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == "`":
+            current.append(ch)
+            in_code = not in_code
+        elif ch == "|" and not in_code:
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    return cells
+
+
+def _is_table_separator(cells: list[str] | None) -> bool:
+    if not cells:
+        return False
+    return all(bool(re.fullmatch(r":?-{3,}:?", cell.replace(" ", ""))) for cell in cells)
+
+
+def _table_start(lines: list[str], index: int) -> tuple[list[str], list[str]] | None:
+    """返回表头和分隔线；普通含管道的段落不会被当成表格。"""
+    if index + 1 >= len(lines):
+        return None
+    header = _split_table_row(lines[index])
+    separator = _split_table_row(lines[index + 1])
+    if not header or not separator or len(header) != len(separator):
+        return None
+    if not _is_table_separator(separator):
+        return None
+    return header, separator
+
+
 def _md_to_html(text: str) -> str:
     """将 Markdown 文本渲染为 HTML（纯标准库），供猪齿鱼评论区展示。
 
     支持：标题 #/##/###、代码块 ```、无序/有序列表、引用 >、表格、段落、加粗/斜体/行内代码。
-    若输入本身就是 HTML（以 < 开头），原样返回，不做二次转义。
+    评论只接受规范 Markdown，不接受原始 HTML，避免编辑器混合解析导致样式异常。
     """
     import re as _re
     lines = (text or "").splitlines()
     if not text or not text.strip():
         raise ChoerodonError("评论内容不能为空")
-    if text.strip().startswith("<"):
-        return text.strip()
+
+    if _re.search(r"<\/?[A-Za-z][^>]*>|<!--[\s\S]*?-->", text):
+        raise ChoerodonError("评论必须使用 Markdown，不能直接传入 HTML 标签")
+    if any(ord(ch) < 32 and ch not in "\n\r\t" for ch in text):
+        raise ChoerodonError("评论 Markdown 含有不可见控制字符")
+
+    # 只校验本渲染器支持的 Markdown 结构，避免未闭合代码块或散乱文本进入评论区。
+    has_markdown = False
+    in_fence = False
+    for line_no, raw_line in enumerate(lines, 1):
+        stripped_line = raw_line.strip()
+        if in_fence:
+            if stripped_line == "```":
+                in_fence = False
+            continue
+        if stripped_line.startswith("```"):
+            if not _re.fullmatch(r"```[A-Za-z0-9_+.-]*", stripped_line):
+                raise ChoerodonError(f"第 {line_no} 行代码块标记不规范")
+            in_fence = True
+            has_markdown = True
+            continue
+        if _table_start(lines, line_no - 1):
+            has_markdown = True
+        if stripped_line.startswith("#"):
+            if not _re.match(r"^#{1,3}\s+\S", stripped_line):
+                raise ChoerodonError(f"第 {line_no} 行标题格式不规范，应使用 '# 标题'")
+            has_markdown = True
+        if _re.match(r"^[-*+]\s+\S", stripped_line) or _re.match(r"^\d+[.)]\s+\S", stripped_line):
+            has_markdown = True
+        if stripped_line.startswith(">"):
+            has_markdown = True
+        if _re.search(r"\*\*[^*\n]+\*\*|(?<!\*)\*[^*\n]+\*(?!\*)|`[^`\n]+`", raw_line):
+            has_markdown = True
+    if in_fence:
+        raise ChoerodonError("评论 Markdown 代码块未闭合")
+    if not has_markdown:
+        raise ChoerodonError("评论必须使用规范 Markdown（至少包含标题、列表、引用、代码块或强调/行内代码）")
 
     html: list[str] = []
     i = 0
@@ -506,13 +594,17 @@ def _md_to_html(text: str) -> str:
         stripped = line.strip()
         # 代码块
         if stripped.startswith("```"):
+            opening = _re.fullmatch(r"```([A-Za-z0-9_+.-]*)", stripped)
+            language = opening.group(1) if opening else ""
             i += 1
             code_lines: list[str] = []
-            while i < n and not lines[i].strip().startswith("```"):
+            while i < n and lines[i].strip() != "```":
                 code_lines.append(lines[i])
                 i += 1
-            i += 1  # 跳过结束 ```（若存在）
-            html.append("<pre><code>" + _esc("\n".join(code_lines)) + "</code></pre>")
+            if i < n:
+                i += 1  # 跳过结束 ```
+            class_attr = f' class="language-{language}"' if language else ""
+            html.append(f"<pre><code{class_attr}>" + _esc("\n".join(code_lines)) + "</code></pre>")
             continue
         # 标题
         m = _re.match(r"^(#{1,3})\s+(.*)$", stripped)
@@ -548,6 +640,48 @@ def _md_to_html(text: str) -> str:
                 i += 1
             html.append("<ol>" + "".join(items) + "</ol>")
             continue
+        # Markdown 管道表格
+        table = _table_start(lines, i)
+        if table:
+            headers, separators = table
+            alignments: list[str | None] = []
+            for separator in separators:
+                compact = separator.replace(" ", "")
+                if compact.startswith(":") and compact.endswith(":"):
+                    alignments.append("center")
+                elif compact.startswith(":"):
+                    alignments.append("left")
+                elif compact.endswith(":"):
+                    alignments.append("right")
+                else:
+                    alignments.append(None)
+
+            def render_cell(tag: str, value: str, align: str | None) -> str:
+                align_attr = f' align="{align}"' if align else ""
+                return f"<{tag}{align_attr}>{_inline_md(value)}</{tag}>"
+
+            header_html = "".join(
+                render_cell("th", value, alignments[col])
+                for col, value in enumerate(headers)
+            )
+            rows_html: list[str] = []
+            i += 2
+            while i < n:
+                row = _split_table_row(lines[i])
+                if not row or len(row) != len(headers):
+                    break
+                rows_html.append(
+                    "<tr>" + "".join(
+                        render_cell("td", value, alignments[col])
+                        for col, value in enumerate(row)
+                    ) + "</tr>"
+                )
+                i += 1
+            html.append(
+                "<table><thead><tr>" + header_html + "</tr></thead>"
+                "<tbody>" + "".join(rows_html) + "</tbody></table>"
+            )
+            continue
         # 空行
         if not stripped:
             i += 1
@@ -559,7 +693,7 @@ def _md_to_html(text: str) -> str:
 
 
 def _to_html_comment(text: str) -> str:
-    """将评论内容转为 HTML：已是 HTML 则原样返回；否则按 Markdown 渲染（展示更美观）。"""
+    """将规范 Markdown 评论转为 HTML；原始 HTML/纯文本会被拒绝。"""
     t = (text or "").strip()
     if not t:
         raise ChoerodonError("评论内容不能为空")
@@ -591,7 +725,8 @@ def list_issue_comments(issue_id: str, size: int = 100, project_id: str | None =
 def create_issue_comment(issue_id: str, comment: str, project_id: str | None = None) -> dict:
     """为猪齿鱼任务新增评论(写操作)。
 
-    issue_id 为加密 id;comment 支持纯文本或 HTML(纯文本自动转 <p> 段落)。
+    issue_id 为加密 id；comment 必须是规范 Markdown，工具会统一渲染为 HTML。
+    不接受纯文本、原始 HTML 或混合格式。
     对应 API: POST /agile/v1/projects/{pid}/issue_comment,body={issueId, commentText}。
     """
     pid = project_id or DEFAULT_PROJECT_ID

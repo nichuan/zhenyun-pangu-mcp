@@ -5,6 +5,11 @@
   - archery_*   数据库查询（Archery 双站点 cn/aws + 盘古专属租户/实例/库列表）
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
   - search_repo 跨仓代码搜索（内置纯标准库文件遍历，零外部依赖）
+  - gitlab_*    GitLab 项目/代码/文件/目录/分支查询
+  - search/get/save_* 认知层知识、SQL 模板、表目录和关联关系检索/维护
+
+工具选择原则：先用认知层工具发现稳定规则、历史方案和候选表，再用日志/Archery/
+GitLab/猪齿鱼获取当前事实；认知层写工具只沉淀用户确认后的元数据，不执行业务写 SQL。
 """
 from __future__ import annotations
 
@@ -200,7 +205,11 @@ def obs_log_trace(
 
 @mcp.tool()
 def obs_log_datasources(region: str) -> str:
-    """列出指定日志平台的 Loki 数据源（用于确认环境名与数据源名映射）。"""
+    """列出指定日志平台的 Loki 数据源（只读）。
+
+    何时调用：不知道 ``env`` 对应的数据源名称，或需要确认 cn/aws 平台连通性时；
+    返回真实 datasource 名称，不需要手工猜测或把 Grafana 页面名称写进 LogQL。
+    """
     if region not in LOKI_PLATFORMS:
         return _json({"error": f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）"})
     client = loki._get_client(region)
@@ -231,7 +240,8 @@ def archery_query(
     """执行 SQL 查询（只读）。
 
     site=cn 国内 / aws 日本云。instance 可用别名：prod/prod-ro/dev/test。
-    db 默认 srm。仅允许 SELECT/SHOW/DESC/EXPLAIN/WITH 前缀。
+    db 默认 srm。用户 SQL 仅允许单条基础 SELECT、EXPLAIN SELECT 或 SHOW CREATE TABLE；
+    不支持其它 SHOW/DESC、WITH、多语句、注释、函数/子查询、窗口函数、集合运算或任何写入语法。
     """
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
@@ -250,7 +260,11 @@ def archery_describe_table(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """获取表结构（SHOW CREATE TABLE）。"""
+    """获取当前数据库表结构（只读，底层为 SHOW CREATE TABLE）。
+
+    何时调用：表名已确定但字段、类型、索引或注释不确定时；生成查询/修复 SQL
+    前优先使用本工具确认实时 DDL。它查询真实数据库，不依赖知识库目录。
+    """
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
@@ -268,7 +282,11 @@ def archery_list_columns(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """获取表的字段列表。"""
+    """获取当前数据库表的字段名列表（只读）。
+
+    何时调用：只需快速校验字段是否存在，或生成 WHERE/JOIN/修复 SQL 前核对拼写时；
+    需要完整类型、索引和注释时改用 archery_describe_table。
+    """
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
@@ -306,7 +324,11 @@ def archery_list_databases(
     site: str = "cn",
     instance: str | None = None,
 ) -> str:
-    """列出实例下的数据库列表（SHOW DATABASES）。"""
+    """列出指定 Archery 实例下的数据库（只读）。
+
+    何时调用：不确定使用 ``srm``、``srm_logistics_delivery`` 等库，或跨库查询前；
+    这是固定的内部发现能力，不等于 archery_query 对用户开放了任意 SHOW 语句。
+    """
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         result = archery.query_db_list(site, instance_name)
@@ -375,7 +397,11 @@ def choerodon_list_issue(
 
 @mcp.tool()
 def choerodon_search_users(name: str, size: int = 50, project_id: str = "") -> str:
-    """按姓名模糊搜索猪齿鱼项目成员（返回加密 id / 真实名 / 登录名）。"""
+    """按姓名/登录名搜索猪齿鱼项目成员（只读）。
+
+    何时调用：按经办人筛选任务前确认真实成员，或需要把用户输入转换为猪齿鱼成员
+    id 时；返回的真实 id/姓名再交给任务查询工具，不要自行编造 id。
+    """
     return _choerodon_call("search_users", name=name, size=size, project_id=project_id or None)
 
 
@@ -399,7 +425,12 @@ def choerodon_list_attachments(issue_id: str, project_id: str = "") -> str:
 
 @mcp.tool()
 def choerodon_download_attachment(file_url: str) -> str:
-    """通过猪齿鱼 hfle 接口将附件 URL 解析为可下载的签名地址。"""
+    """通过猪齿鱼 hfle 接口获取附件签名下载地址（只读）。
+
+    何时调用：用户明确要求下载某个附件时；必须先用 choerodon_list_attachments
+    获得真实 ``file_url``，本工具不接受凭空构造的 attachment id，也不会把文件内容
+    上传或写回猪齿鱼。
+    """
     return _choerodon_call("download_attachment", file_url=file_url)
 
 
@@ -417,7 +448,8 @@ def choerodon_list_comments(issue_id: str, size: int = 100, project_id: str = ""
 def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> str:
     """为猪齿鱼任务新增评论（写操作，有副作用）。
 
-    issue_id 为工单加密 ID；comment 支持纯文本或 HTML（纯文本自动转 <p> 段落）。
+    issue_id 为工单加密 ID；comment 必须是规范 Markdown（标题/列表/引用/代码块/
+    加粗/行内代码等），不接受纯文本或原始 HTML；工具会将 Markdown 渲染为评论区 HTML。
     ⚠️ 写操作：会真实写入猪齿鱼，调用前必须向用户确认评论内容无误。
     建议先调用 choerodon_list_comments 查看现状，再执行写入。
     """
@@ -457,7 +489,11 @@ def search_repo(
 
 @mcp.tool()
 def gitlab_search_projects(query: str, per_page: int = 20) -> str:
-    """搜索 GitLab 项目（按名称/路径关键词）。"""
+    """搜索 GitLab 项目（只读）。
+
+    何时调用：不知道仓库的 project_id/path，或需要先确认标准库与二开库归属时；
+    返回项目 id、完整路径、默认分支和网页地址，后续交给其它 gitlab_* 工具。
+    """
     try:
         client = gitlab.GitLabClient()
         items = client.list_projects(query, per_page=per_page)
@@ -480,7 +516,8 @@ def gitlab_search_projects(query: str, per_page: int = 20) -> str:
 def gitlab_search_code(query: str, per_page: int = 20) -> str:
     """GitLab 代码搜索（在配置的搜索根 group/project 下按关键词检索 blob）。
 
-    返回命中文件路径与行号，通常再配合 gitlab_get_file 读取具体内容。
+    何时调用：知道类名、方法名、错误文本或配置键但不知道文件位置时；返回命中
+    项目、路径、分支和行号，随后用 gitlab_get_file 读取完整文件核对上下文。
     """
     try:
         client = gitlab.GitLabClient()
@@ -503,7 +540,11 @@ def gitlab_search_code(query: str, per_page: int = 20) -> str:
 
 @mcp.tool()
 def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
-    """读取 GitLab 仓库文件的原始内容（文本）。"""
+    """读取 GitLab 仓库指定分支/引用下的完整文件（只读）。
+
+    何时调用：gitlab_search_code 或 gitlab_list_tree 已定位文件后，需要完整源码、
+    配置或版本上下文时；``project_id``、``path``、``ref`` 必须来自真实 GitLab 返回。
+    """
     try:
         content = gitlab.GitLabClient().get_file(project_id, path, ref=ref)
         return _json({"project_id": project_id, "path": path, "ref": ref, "content": content})
@@ -519,7 +560,11 @@ def gitlab_list_tree(
     recursive: bool = False,
     per_page: int = 100,
 ) -> str:
-    """列出 GitLab 仓库目录树（文件/子目录）。"""
+    """列出 GitLab 仓库目录树（只读）。
+
+    何时调用：已知仓库但不知道模块/文件路径，或需要确认某个 ref 下的目录结构时；
+    找到目标文件后再用 gitlab_get_file，``recursive`` 用于控制扫描范围。
+    """
     try:
         items = gitlab.GitLabClient().list_tree(
             project_id, path=path, ref=ref, recursive=recursive, per_page=per_page
@@ -531,7 +576,11 @@ def gitlab_list_tree(
 
 @mcp.tool()
 def gitlab_list_branches(project_id: str, per_page: int = 50) -> str:
-    """列出 GitLab 仓库分支。"""
+    """列出 GitLab 仓库分支及保护状态（只读）。
+
+    何时调用：读取源码前需要选择 hotfix/release/master 等真实 ref，或需要确认
+    默认/保护分支时；不要直接猜测仓库分支名。
+    """
     try:
         branches = gitlab.GitLabClient().list_branches(project_id, per_page=per_page)
         slim = [
@@ -648,9 +697,14 @@ def search_knowledge(
     limit: int = 10,
     use_semantic: bool = True,
 ) -> str:
-    """检索业务知识/排查经验（混合检索：语义向量 + 关键词，综合排序）。
+    """检索业务知识、系统机制和排查经验（只读）。
 
-    排障/写 SQL 前先检索是否已有认知沉淀。可按 类型/系统/模块/状态 过滤。
+    何时调用：排障、生成 SQL 或解释字段/状态前，先查是否已有企业认知。
+    ``query`` 为空时按过滤条件列出最近更新的知识；有关键词时默认混合
+    语义向量和关键词检索。``knowledge_type`` 可用 business/system/technical/
+    troubleshooting/data_model/configuration/experience/rule，``status`` 可用
+    draft/verified/deprecated/archived；``verified_only=true`` 只返回 verified。
+    ``limit`` 最大 50。结果中的 ``id`` 可交给 get_knowledge 获取完整正文。
     """
     return kb.search_knowledge(query, knowledge_type, system, module, status, verified_only, limit, use_semantic)
 
@@ -665,7 +719,14 @@ def search_sql_templates(
     limit: int = 10,
     use_semantic: bool = True,
 ) -> str:
-    """检索可复用的 SQL/修复模板（混合检索）。生成 SQL 前先调用，形成闭环。"""
+    """检索可复用的 SQL/修复模板（只读，混合检索）。
+
+    何时调用：生成查询或人工确认修复 SQL 前，先用业务关键词、表名或问题
+    症状检索历史方案；优先筛选 ``verified_only=true``。可用过滤项为
+    ``category``、``system``、``business_domain``；``keyword`` 为空时用于
+    按过滤条件总览模板，``limit`` 最大 50。命中结果的 ``id`` 交给
+    get_sql_template；复用完成后再调用 record_template_usage。
+    """
     return kb.search_sql_templates(keyword, category, system, business_domain, verified_only, limit, use_semantic)
 
 
@@ -677,47 +738,80 @@ def search_tables(
     top_k: int = 5,
     use_semantic: bool = True,
 ) -> str:
-    """按关键词/语义检索表目录（table_catalog），返回表注释、关键字段等机器事实。"""
+    """按关键词/语义检索表目录（只读），返回候选表元数据。
+
+    何时调用：不知道真实表名、需要从业务描述定位表时。``query`` 必填；
+    ``domain``/``db_name`` 用于缩小范围，``top_k`` 最大 20。目录结果是
+    候选和业务注释，不等同于当前数据库字段事实；字段存在性和完整 DDL
+    必须再用 archery_describe_table/archery_list_columns 确认。
+    """
     return kb.search_tables(query, domain, db_name, top_k, use_semantic)
 
 
 @mcp.tool()
 def search_pangu(query: str, system: str = "", module: str = "", category: str = "", top_k: int = 3) -> str:
-    """统一搜索：一次同时检索 知识 + 模板 + 表 + 相关关系，适合快速发现；精准检索请用专项工具。"""
+    """统一快速发现：一次检索知识、模板、表及候选表关系（只读）。
+
+    适合刚收到一个跨知识/数据域的问题时做第一轮定位；``system``、
+    ``module``、``category`` 可缩小结果，``top_k`` 最大 5。它是关键词快速
+    发现，不替代专项检索或实时 Archery 查询；拿到 id/表名后继续调用
+    get_knowledge、get_sql_template、get_table 或 get_table_relations。
+    """
     return kb.search_pangu(query, system, module, category, top_k)
 
 
 # ---- Context：获取完整上下文 ----
 @mcp.tool()
 def get_knowledge(doc_id: int) -> str:
-    """按 id 获取单条知识的完整正文。"""
+    """按 ``doc_id`` 获取单条知识的完整 Markdown 正文及元数据（只读）。
+
+    先用 search_knowledge 命中 id，再调用本工具；适合需要引用完整规则、
+    排查步骤或字段说明时使用。
+    """
     return kb.get_knowledge(doc_id)
 
 
 @mcp.tool()
 def get_sql_template(template_id: int) -> str:
-    """按 id 获取单条 SQL 模板的完整内容（含执行过程与示例）。"""
+    """按 ``template_id`` 获取单条 SQL 模板及风险/验证元数据（只读）。
+
+    先用 search_sql_templates 命中 id，再读取完整 SQL 和参数说明。模板中的
+    UPDATE/DELETE/INSERT 仅表示供人工确认的方案，不代表本 MCP 会执行写入。
+    """
     return kb.get_sql_template(template_id)
 
 
 @mcp.tool()
 def get_table(table_name: str, db_name: str = "") -> str:
-    """获取单张表的元数据详情（表注释/描述/关键字段/入口字段）。"""
+    """按表名获取目录元数据详情（只读）。
+
+    返回表注释、描述、关键字段和入口字段，适合 search_tables 命中后补全
+    上下文；它不是实时 DDL，字段最终仍需 Archery 专用工具确认。
+    ``db_name`` 为空时使用目录默认库（通常为 srm）。
+    """
     return kb.get_table(table_name, db_name)
 
 
 @mcp.tool()
 def get_table_relations(table_name: str) -> str:
-    """获取某张表已沉淀的关联关系（join 路径 + 关系语义 + 置信度）。"""
+    """获取某张表已沉淀的关联关系（只读）。
+
+    返回 from/to 表、join 条件、关系类型、描述和置信度；用于设计 JOIN 或
+    诊断数据链路。关系是知识库沉淀，不等于数据库约束，执行前仍应确认两端
+    字段存在并用 SELECT 验证结果。
+    """
     return kb.get_table_relations(table_name)
 
 
 # ---- Composite：组合诊断 ----
 @mcp.tool()
 def diagnose_context(query: str, system: str = "", module: str = "", limit: int = 3) -> str:
-    """组合诊断：针对一个业务问题，自动汇集 认知 → 行动模板 → 相关表 → 表关系 的诊断上下文。
+    """组合诊断：为一个问题汇集知识 → 模板 → 表 → 关系（只读）。
 
-    内部自动完成 knowledge→template→table→relation 的多层检索，返回统一诊断上下文。
+    何时调用：排障或复杂 SQL 任务尚未知道该查哪类资料时，作为第一轮
+    上下文收集器；``system``/``module`` 可过滤知识，``limit`` 最大 5。
+    结果用于确定下一步工具，不会查询实时日志/数据库，也不会自动生成或
+    执行修复 SQL；随后按结果分别调用专项工具和 Archery。
     """
     return kb.diagnose_context(query, system, module, limit)
 
@@ -739,7 +833,14 @@ def save_knowledge(
     created_by: str = "",
     skip_dup_check: bool = False,
 ) -> str:
-    """沉淀一条知识到知识库（写操作）。默认会做相似去重，跳过需 skip_dup_check=true。"""
+    """写入一条业务知识/排查经验（写操作，需用户确认内容）。
+
+    ``content_md`` 必须是规范 Markdown；``core_tables``、``tags``、
+    ``related_template_ids`` 传逗号分隔值（如 ``a,b``）。默认 ``status=draft``，
+    只有经过事实核验后才设 verified；``knowledge_type`` 见 search_knowledge
+    的枚举。适合沉淀本次确认过的稳定规则、排查结论或数据模型说明，不要把
+    会变化的当前日志/数据写成知识。写入 knowledge_docs，不修改业务库。
+    """
     return kb.save_knowledge(
         title, content_md, knowledge_type, system, module, summary,
         core_tables, related_template_ids, tags, status, source_type, created_by, skip_dup_check,
@@ -766,7 +867,15 @@ def save_sql_template(
     created_by: str = "",
     skip_dup_check: bool = False,
 ) -> str:
-    """沉淀一条可复用 SQL/修复模板（写操作）。parameters 传 JSON 字符串存为 JSONB。"""
+    """写入一条可复用 SQL/修复模板（写操作，需用户确认内容）。
+
+    适合复杂查询或人工执行的修复方案在验证后沉淀；本工具只写模板库，
+    不执行 ``sql_text``。``keywords``/``core_tables`` 传逗号分隔值，
+    ``parameters`` 必须是 JSON 对象字符串（例如
+    ``{"tenant_id":{"type":"bigint","required":true}}``）。
+    ``status`` 可用 draft/verified/trusted/deprecated，``risk_level`` 可用
+    LOW/MEDIUM/HIGH/CRITICAL；未核验模板保持 draft。
+    """
     return kb.save_sql_template(
         title, category, scenario, sql_text, keywords, core_tables, verified, template_no,
         system, status, risk_level, business_domain, source_type, parameters,
@@ -782,7 +891,11 @@ def list_sql_templates(
     verified_only: bool = False,
     limit: int = 50,
 ) -> str:
-    """列出模板库中的模板（可按分类/系统/业务域/验证状态过滤），用于总览与维护。"""
+    """列出模板库总览（只读）。
+
+    用于维护或不知道模板 id 时按分类、系统、业务域和 verified 状态浏览；
+    ``limit`` 最大 200。只读查看不需要确认，变更请使用 update/delete 写工具。
+    """
     return kb.list_sql_templates(category, system, business_domain, verified_only, limit)
 
 
@@ -804,7 +917,13 @@ def update_sql_template(
     source_type: str = "",
     verified: bool = False,
 ) -> str:
-    """更新已有模板字段（写操作；补充验证标记/修正 SQL/调整分类风险）。"""
+    """部分更新已有模板（写操作，需用户确认）。
+
+    先用 get_sql_template 确认 ``template_id``；只传需要修改的字段。适合
+    修正 SQL/分类/风险、补充参数或把已核验模板标为 verified。``parameters``
+    仍须为 JSON 对象字符串；``verified=true`` 会将状态提升为 verified。
+    不会执行模板 SQL。
+    """
     return kb.update_sql_template(
         template_id, title, scenario, sql_text, category, system, status, risk_level,
         business_domain, keywords, core_tables, parameters, execution_policy,
@@ -814,13 +933,20 @@ def update_sql_template(
 
 @mcp.tool()
 def delete_sql_template(template_id: int) -> str:
-    """删除指定模板（写操作，仅维护场景使用）。"""
+    """删除指定模板（破坏性写操作，必须用户明确确认）。
+
+    仅用于清理错误、重复或已废弃模板；删除前先 get_sql_template 核对 id，
+    本操作不影响业务数据库。
+    """
     return kb.delete_sql_template(template_id)
 
 
 @mcp.tool()
 def record_template_usage(template_id: int) -> str:
-    """模板被复用后累加使用次数。"""
+    """记录一次模板复用（写入使用统计，不执行 SQL）。
+
+    仅在模板确实被采用后调用，避免为了排序而虚增 usage_count。
+    """
     return kb.record_template_usage(template_id)
 
 
@@ -835,13 +961,23 @@ def add_table_relation(
     from_db: str = "srm",
     to_db: str = "srm",
 ) -> str:
-    """沉淀一条经过 SQL 验证的表关联关系（写操作，upsert 去重）。"""
+    """写入一条已验证的表关联关系（写操作，需用户确认，按键 upsert）。
+
+    仅在 Archery/SELECT 验证两端字段和 join 结果后调用；``join_on`` 传可读
+    的连接条件（如 ``a.order_id = b.order_id``），``confidence`` 范围 0~1，
+    ``from_db``/``to_db`` 用实际库名。该记录是知识库元数据，不创建数据库
+    外键，也不执行 join。
+    """
     return kb.add_table_relation(from_table, to_table, join_on, relation_type, description, confidence, from_db, to_db)
 
 
 @mcp.tool()
 def record_table_usage(table_names: str) -> str:
-    """记录表被使用（自进化权重），table_names 逗号分隔。"""
+    """记录本次实际使用过的表（写入目录使用统计）。
+
+    ``table_names`` 传逗号分隔表名，例如 ``sodr_order,slod_asn``；仅在查询
+    或诊断确实使用后调用，不修改表元数据和业务数据。
+    """
     return kb.record_table_usage(table_names)
 
 
@@ -849,7 +985,13 @@ def record_table_usage(table_names: str) -> str:
 def upsert_table_knowledge(
     table_name: str, description: str = "", tags: str = "", db_name: str = "",
 ) -> str:
-    """修正/补录单表元数据描述与标签（写操作，upsert）。"""
+    """修正或补录表目录描述/标签（写操作，需用户确认，按库名+表名 upsert）。
+
+    何时调用：search_tables/get_table 未收录或描述过期，且已通过 Archery
+    确认真实表后补录。至少提供 ``description``、``tags`` 或 ``db_name`` 之一；
+    ``tags`` 传逗号分隔值。这里只写 table_catalog 元数据，不替代实时 DDL，
+    不修改业务表。
+    """
     return kb.upsert_table_knowledge(table_name, description, tags, db_name)
 
 
