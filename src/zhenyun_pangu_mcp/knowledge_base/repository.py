@@ -226,19 +226,53 @@ def upsert_table_knowledge(table_name: str, patch: dict[str, Any]) -> dict[str, 
     return resp[0] if resp else None
 
 
+# relation source 枚举（供 SQL Agent 判断可信度）
+VALID_RELATION_SOURCES = (
+    "archery_select",   # 经 Archery/SELECT 实测两端字段与 join 结果验证
+    "ddl",              # 由数据库 DDL / 外键推断
+    "manual",           # 人工确认（默认）
+    "inferred",         # 自动推断（未实测，需谨慎）
+)
+
+
+def _has_column(table: str, column: str) -> bool:
+    """探测指定表是否含某列（避免写入不存在的列导致 REST 400）。"""
+    try:
+        rows = sb.query_table(table, select=column, limit=1)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def add_table_relation(
     from_table: str, to_table: str, join_on: str,
     relation_type: str = "ref", description: str = "",
     confidence: float = 1.0, from_db: str = "srm", to_db: str = "srm",
+    verified: bool = False, source: str = "manual",
 ) -> dict[str, Any] | None:
-    """沉淀一条表关联关系（upsert 按 from_table,to_table,join_on）。"""
-    url = f"{sb.base_url()}/rest/v1/{sb.config.TABLE_RELATION_TABLE}?on_conflict=from_table%2Cto_table%2Cjoin_on"
-    resp = sb._rest_request("POST", url, body={
+    """沉淀一条表关联关系（upsert 按 from_table,to_table,join_on）。
+
+    可信度属性（P0-3 增强，供 SQL Agent 判断 JOIN 可靠性）：
+      - confidence：0~1，对 join 正确性的置信度。
+      - verified：是否已经 Archery/SELECT 实测验证过两端字段与结果。
+      - source：来源（archery_select / ddl / manual / inferred）。
+    兼容性：verified/source 列如生产表不存在则跳过写入，不阻塞主流程。
+    """
+    body: dict[str, Any] = {
         "from_table": from_table, "to_table": to_table, "join_on": join_on,
         "relation_type": relation_type, "description": description or "",
         "confidence": max(0.0, min(1.0, float(confidence))),
         "from_db": from_db or "srm", "to_db": to_db or "srm",
-    })
+    }
+    src = (source or "manual").strip().lower()
+    if src not in VALID_RELATION_SOURCES:
+        src = "manual"
+    # verified 列已被 get_relations select 使用，安全写入；source 列先探测
+    body["verified"] = bool(verified)
+    if _has_column(sb.config.TABLE_RELATION_TABLE, "source"):
+        body["source"] = src
+    url = f"{sb.base_url()}/rest/v1/{sb.config.TABLE_RELATION_TABLE}?on_conflict=from_table%2Cto_table%2Cjoin_on"
+    resp = sb._rest_request("POST", url, body=body)
     return resp[0] if resp else None
 
 
@@ -289,11 +323,15 @@ def search_tables_semantic(
 # =========================================================================== #
 def get_relations(table_name: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    base_select = "from_table,to_table,join_on,relation_type,description,confidence,from_db,to_db,verified"
+    # 兼容：source 列存在才 select，避免旧表上 REST 400
+    if _has_column(sb.config.TABLE_RELATION_TABLE, "source"):
+        base_select += ",source"
     for col in ("from_table", "to_table"):
         try:
             rows = sb.query_table(
                 sb.config.TABLE_RELATION_TABLE,
-                select="from_table,to_table,join_on,relation_type,description,confidence,from_db,to_db,verified",
+                select=base_select,
                 eq={col: table_name}, limit=100,
             )
             out.extend(rows or [])

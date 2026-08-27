@@ -198,6 +198,44 @@ AS $$
 $$;
 
 -- ============================================================================
+-- table_relations：表与表之间的关联关系（JOIN 候选；机器事实，供 SQL Agent 复用）
+-- 设计要点（P0-3 可信度增强）：
+--   confidence 0~1：对 join 正确性的置信度
+--   verified    是否已经 Archery/SELECT 实测验证过两端字段与 join 结果
+--   source      来源：archery_select(实测)/ddl(外键推断)/manual(人工)/inferred(自动推断)
+-- SQL Agent 应优先采信 verified=true + source=archery_select 的关系；未验证的仅作候选。
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS table_relations (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    from_table    TEXT NOT NULL,                           -- 来源表
+    to_table      TEXT NOT NULL,                           -- 目标表
+    from_db       TEXT NOT NULL DEFAULT 'srm',             -- 来源库
+    to_db         TEXT NOT NULL DEFAULT 'srm',             -- 目标库
+    join_on       TEXT NOT NULL,                           -- 连接条件（可读，如 a.order_id = b.order_id）
+    relation_type TEXT NOT NULL DEFAULT 'ref',             -- 关系类型：ref/fk/many-to-many/...
+    description   TEXT DEFAULT '',                         -- 描述
+    confidence    DOUBLE PRECISION NOT NULL DEFAULT 1.0,   -- 置信度 0~1
+    verified      BOOLEAN NOT NULL DEFAULT FALSE,          -- 是否已实测验证
+    source        TEXT NOT NULL DEFAULT 'manual',          -- 来源：archery_select/ddl/manual/inferred
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (from_table, to_table, join_on)                 -- upsert 去重键
+);
+
+CREATE INDEX IF NOT EXISTS idx_table_relations_from ON table_relations (from_table);
+CREATE INDEX IF NOT EXISTS idx_table_relations_to ON table_relations (to_table);
+CREATE INDEX IF NOT EXISTS idx_table_relations_verified ON table_relations (verified);
+
+DROP TRIGGER IF EXISTS trg_table_relations_updated_at ON table_relations;
+CREATE TRIGGER trg_table_relations_updated_at
+    BEFORE UPDATE ON table_relations
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 若生产库已有 table_relations 但缺 source 列，执行以下迁移：
+-- ALTER TABLE table_relations ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
+-- ALTER TABLE table_relations ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ============================================================================
 -- 权限配置（重要，务必执行！）
 -- 若未配置，使用 service_role key 连接会报：permission denied for schema public (SQLSTATE 42501)
 -- ============================================================================

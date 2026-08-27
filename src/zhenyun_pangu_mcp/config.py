@@ -139,9 +139,12 @@ GITLAB_SEARCH_ROOT_GROUP = os.getenv("GITLAB_SEARCH_ROOT_GROUP", "srm")
 GITLAB_SEARCH_DEFAULT_SCOPE = os.getenv("GITLAB_SEARCH_DEFAULT_SCOPE", "srm")
 
 # ---------------------------------------------------------------------------
-# 跨仓代码搜索根目录(纯本地遍历,默认回退到本仓库根,无需外部仓库)
+# 跨仓代码搜索根目录(纯本地遍历)。
+# 默认回退到本 MCP 包目录(PKG_ROOT),而非整仓上层(REPO_ROOT),避免 search_repo
+# 在未显式配置时递归遍历整个项目树(含 .venv、__pycache__ 等),导致扫描失控/超时。
+# 需要跨仓检索时,请在 .env 显式配置 PG_ROOT 指向目标仓库目录。
 # ---------------------------------------------------------------------------
-PG_ROOT = os.getenv("PG_ROOT", str(REPO_ROOT))
+PG_ROOT = os.getenv("PG_ROOT", str(PKG_ROOT))
 
 # ---------------------------------------------------------------------------
 # 知识库 Supabase(知识/模板/表/关系 四张表所在元数据库,不存业务数据)

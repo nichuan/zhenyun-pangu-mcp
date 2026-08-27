@@ -123,6 +123,69 @@ def test_create_issue_comment_target_not_found_raises():
 
 
 # ---------------------------------------------------------------------------
+# download_attachment：签名下载地址（mock get_access_token + requests）
+# 覆盖 P0-1 修复：301/302 走 Location 头；200 无 Location 时走 JSON url；
+# 200 且无 Location 且响应体非 dict/无 url 时应报清晰错误，而非 KeyError。
+# ---------------------------------------------------------------------------
+class _FakeResp:
+    def __init__(self, status, headers=None, json_body=None):
+        self.status_code = status
+        self.headers = headers or {}
+        self._json_body = json_body
+
+    def json(self):
+        if isinstance(self._json_body, Exception):
+            raise self._json_body
+        return self._json_body
+
+
+def test_download_attachment_302_uses_location():
+    resp = _FakeResp(302, headers={"Location": "https://signed.example/x"})
+    with mock.patch.object(choerodon, "get_access_token", return_value="tok"), \
+         mock.patch("requests.get", return_value=resp):
+        out = choerodon.download_attachment("https://file/x")
+    assert out["signed_url"] == "https://signed.example/x"
+
+
+def test_download_attachment_200_location_priority():
+    # 200 且同时带 Location 头：优先 Location（不回退 JSON url）
+    resp = _FakeResp(200, headers={"Location": "https://signed.example/x"},
+                     json_body={"url": "https://wrong.example"})
+    with mock.patch.object(choerodon, "get_access_token", return_value="tok"), \
+         mock.patch("requests.get", return_value=resp):
+        out = choerodon.download_attachment("https://file/x")
+    assert out["signed_url"] == "https://signed.example/x"
+
+
+def test_download_attachment_200_no_location_uses_json_url():
+    # 200 且无 Location：回退取 JSON 体 url 字段
+    resp = _FakeResp(200, headers={}, json_body={"url": "https://signed.example/x"})
+    with mock.patch.object(choerodon, "get_access_token", return_value="tok"), \
+         mock.patch("requests.get", return_value=resp):
+        out = choerodon.download_attachment("https://file/x")
+    assert out["signed_url"] == "https://signed.example/x"
+
+
+def test_download_attachment_200_no_url_raises_clear_error():
+    # 200、无 Location、JSON 体又无 url：此前优先级 bug 会抛 KeyError，
+    # 修复后应给出清晰 ChoerodonError，绝不抛 500。
+    resp = _FakeResp(200, headers={}, json_body={"foo": "bar"})
+    with mock.patch.object(choerodon, "get_access_token", return_value="tok"), \
+         mock.patch("requests.get", return_value=resp):
+        with pytest.raises(choerodon.ChoerodonError, match="未返回可用下载地址"):
+            choerodon.download_attachment("https://file/x")
+
+
+def test_download_attachment_200_non_json_body_raises_clear_error():
+    # 200、无 Location、响应体非 JSON：应报清晰错误而非 KeyError
+    resp = _FakeResp(200, headers={}, json_body=ValueError("not json"))
+    with mock.patch.object(choerodon, "get_access_token", return_value="tok"), \
+         mock.patch("requests.get", return_value=resp):
+        with pytest.raises(choerodon.ChoerodonError, match="非 JSON"):
+            choerodon.download_attachment("https://file/x")
+
+
+# ---------------------------------------------------------------------------
 # list_issue_comments：查评论（mock _request）
 # ---------------------------------------------------------------------------
 def test_list_issue_comments_parses():

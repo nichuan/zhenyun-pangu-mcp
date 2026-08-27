@@ -300,14 +300,18 @@ def query_trace(
     ns = _ns_from_env(platform, env)
     # 优先：带 namespace 限定（扫描范围小、快）
     scoped_full = f'{{namespace="{ns}"}} |= "{tid}"'
-    # 兜底：不限定 namespace（带 ns 查询为 0 时自动降级一次，避免无限回退）
+    # 兜底：不限定 namespace。仅在带 ns 查询为 0 时降级一次（适配 namespace 推导
+    # 偏差/多租户混部）。为防 traceId 为高频词时扫描全量流导致超时：
+    #   - 兜底查询的 limit 收到 ns 限定的 1/5（最小 50），避免拉取过量；
+    #   - 调用方通过 meta.unscoped_fallback 感知是否走了全量扫描。
     unscoped_full = f'{{}} |= "{tid}"'
 
     full_rows = _parse_streams(client.loki_query_range(uid, scoped_full, start, end, limit, direction))
     fallback = False
     if not full_rows:
         fallback = True
-        full_rows = _parse_streams(client.loki_query_range(uid, unscoped_full, start, end, limit, direction))
+        unscoped_limit = max(50, int(limit / 5))
+        full_rows = _parse_streams(client.loki_query_range(uid, unscoped_full, start, end, unscoped_limit, direction))
 
     merged = list({(r["ts_ns"], r["line"]): r for r in full_rows}.values())
     merged.sort(key=lambda r: r["ts_ns"], reverse=(direction == "BACKWARD"))
@@ -351,6 +355,7 @@ def query_trace(
         "level_filter": level_l,
         "namespace_scoped": not fallback,
         "namespace_fallback": fallback,
+        "unscoped_fallback": fallback,  # 是否走了不限 namespace 的全量扫描（结果可能不完整）
         "full_query": used_full,
         "clip_len": clip,
         "raw_total": raw_total,

@@ -448,9 +448,25 @@ def download_attachment(file_url: str) -> dict:
     )
     if resp.status_code not in (200, 301, 302):
         raise ChoerodonError(f"附件 redirect 失败 {resp.status_code}")
-    target = resp.headers.get("Location") or resp.json().get("url") if resp.status_code in (200,) else resp.headers.get("Location")
+    # 显式分支，避免原三元表达式的运算符优先级歧义：
+    #   - 302：跳转地址在 Location 头
+    #   - 200：目标地址可能在 JSON 体 url 字段（也可能带 Location 头）
+    # 优先级 bug 修复：此前 `A or B if cond else C` 实际被解析为 `(A or B) if cond else C`，
+    # 当 status=200 且无 Location 且响应体无 url 键时，resp.json().get 会因键缺失/非 dict 触发异常。
+    if resp.status_code in (301, 302):
+        target = resp.headers.get("Location")
+    else:  # 200
+        target = resp.headers.get("Location")
+        if not target:
+            try:
+                body = resp.json()
+            except ValueError:
+                raise ChoerodonError("附件 redirect 成功但响应体非 JSON，且无 Location 头")
+            target = body.get("url") if isinstance(body, dict) else None
     if isinstance(target, dict):
         target = target.get("url")
+    if not target:
+        raise ChoerodonError("附件 redirect 未返回可用下载地址（无 Location 头、无 url 字段）")
     return {"signed_url": target, "original_url": file_url}
 
 

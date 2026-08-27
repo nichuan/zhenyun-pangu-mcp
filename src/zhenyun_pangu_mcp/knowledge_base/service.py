@@ -107,9 +107,13 @@ def _fmt_cols(cols: list[Any]) -> str:
 def fmt_relation(r: dict[str, Any]) -> str:
     conf = r.get("confidence")
     conf_txt = f"{float(conf):.1f}" if conf is not None else "—"
+    verified = r.get("verified")
+    verified_txt = "✅ 已验证" if verified else "⚠️ 未验证"
+    src = r.get("source") or ""
+    src_txt = f"，来源 {src}" if src else ""
     return (
         f"- `{r.get('from_table')}` → `{r.get('to_table')}`  [{r.get('relation_type')}] "
-        f"置信度 {conf_txt}\n"
+        f"置信度 {conf_txt}，{verified_txt}{src_txt}\n"
         f"  - join：`{r.get('join_on')}`\n"
         f"  - {r.get('description') or ''}\n"
     )
@@ -497,19 +501,33 @@ def record_template_usage(template_id: int) -> str:
 
 def add_table_relation(
     from_table: str, to_table: str, join_on: str, relation_type: str = "ref",
-    description: str = "", confidence: float = 1.0, from_db: str = "srm", to_db: str = "srm",
+    description: str = "", confidence: float = 1.0, from_db: str = "srm",
+    to_db: str = "srm", verified: bool = False, source: str = "manual",
 ) -> str:
-    """沉淀一条经过 SQL 验证的表关联关系（写操作，upsert 去重）。"""
+    """沉淀一条表关联关系（写操作，upsert 去重）。
+
+    ``verified=True`` 表示已经 Archery/SELECT 实测验证过两端字段与 join 结果；
+    ``source`` 表示来源（archery_select / ddl / manual / inferred）。
+    未实测的关系请保持 verified=False，让 SQL Agent 谨慎使用。
+    """
     try:
         from_table = (from_table or "").strip().lower()
         to_table = (to_table or "").strip().lower()
         join_on = (join_on or "").strip()
         if not (from_table and to_table and join_on):
             return "⚠️ from_table / to_table / join_on 均不能为空。"
+        src = (source or "manual").strip().lower()
+        if src not in repo.VALID_RELATION_SOURCES:
+            src = "manual"
         row = repo.add_table_relation(
-            from_table, to_table, join_on, relation_type.upper(), description, confidence, from_db, to_db,
+            from_table, to_table, join_on, relation_type.upper(), description,
+            confidence, from_db, to_db, verified=bool(verified), source=src,
         )
-        return f"✅ 已沉淀关联 `{from_table}` → `{to_table}` [{relation_type.upper()}] 置信度 {float(confidence):.1f}。"
+        vmark = "（已验证）" if verified else "（未验证）"
+        return (
+            f"✅ 已沉淀关联 `{from_table}` → `{to_table}` [{relation_type.upper()}] "
+            f"置信度 {float(confidence):.1f}{vmark} 来源 {src}。"
+        )
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

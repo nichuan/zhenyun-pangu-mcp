@@ -32,6 +32,86 @@ def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+# ---------------------------------------------------------------------------
+# 统一 MCP Response（P0 标准化：ok / error.code / error.retryable / meta.*）
+# ---------------------------------------------------------------------------
+# 目标：所有工具返回结构统一，方便 Agent 判断成功/失败与是否可重试。
+#   - 成功：{..., "ok": true, "meta": {"source": <来源>, "observed_at": <时间>}}
+#   - 失败：{"ok": false, "error": {"code": <分类>, "message": <人类可读>, "retryable": <是否可重试>}}
+# 兼容性：保留原有顶层业务字段（results/query/count 等），仅在结构外层补充 ok/meta，
+# 不破坏现有 Skill 对返回的解析。
+_SOURCE_MAP = {
+    "obs_log_query": "loki",
+    "obs_log_trace": "loki",
+    "obs_log_datasources": "loki",
+    "obs_sls_query": "sls",
+    "archery_query": "archery",
+    "archery_describe_table": "archery",
+    "archery_list_columns": "archery",
+    "archery_query_tenant": "archery",
+    "archery_list_databases": "archery",
+    "archery_list_instances": "archery",
+    "search_repo": "local-repo",
+    "gitlab_search_projects": "gitlab",
+    "gitlab_search_code": "gitlab",
+    "gitlab_get_file": "gitlab",
+    "gitlab_list_tree": "gitlab",
+    "gitlab_list_branches": "gitlab",
+    "search_knowledge": "knowledge-base",
+    "search_sql_templates": "knowledge-base",
+    "search_tables": "knowledge-base",
+    "search_pangu": "knowledge-base",
+    "get_knowledge": "knowledge-base",
+    "get_sql_template": "knowledge-base",
+    "get_table": "knowledge-base",
+    "get_table_relations": "knowledge-base",
+    "diagnose_context": "knowledge-base",
+    "list_sql_templates": "knowledge-base",
+    "save_knowledge": "knowledge-base",
+    "save_sql_template": "knowledge-base",
+    "update_sql_template": "knowledge-base",
+    "delete_sql_template": "knowledge-base",
+    "record_template_usage": "knowledge-base",
+    "add_table_relation": "knowledge-base",
+    "record_table_usage": "knowledge-base",
+    "upsert_table_knowledge": "knowledge-base",
+    "choerodon_query_issue": "choerodon",
+    "choerodon_list_issue": "choerodon",
+    "choerodon_search_users": "choerodon",
+    "choerodon_get_status_map": "choerodon",
+    "choerodon_search_tasks_by_person": "choerodon",
+    "choerodon_list_attachments": "choerodon",
+    "choerodon_download_attachment": "choerodon",
+    "choerodon_list_comments": "choerodon",
+    "choerodon_add_comment": "choerodon",
+}
+
+
+def _now_str() -> str:
+    return datetime.now(BJ).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _err(code: str, message: str, retryable: bool = False) -> str:
+    """统一失败响应：含错误分类与是否可重试。"""
+    return _json({
+        "ok": False,
+        "error": {"code": code, "message": message, "retryable": bool(retryable)},
+    })
+
+
+def _ok(data: object, source: str) -> str:
+    """统一成功响应：保留业务字段，顶层补充 ok=true 与 meta。"""
+    if isinstance(data, dict):
+        data["ok"] = True
+        meta = data.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            data["meta"] = meta
+        meta.setdefault("source", source)
+        meta.setdefault("observed_at", _now_str())
+    return _json(data)
+
+
 # ============================================================================
 # 时间解析（北京时间）
 # ============================================================================
@@ -100,12 +180,18 @@ def obs_log_query(
     标签过滤（如 {namespace="saas-test-new"}），否则将扫描全部数据流（见 warning）。
     """
     if region not in LOKI_PLATFORMS:
-        return _json({"error": f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）"})
+        return _err("bad_param", f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）")
     if not query or not query.strip():
-        return _json({"error": "query 不能为空，必须传入 LogQL 表达式，如 '{namespace=\"saas-test-new\"} |= \"xxx\"'"})
-    ds_name = loki.resolve_datasource(region, env)
+        return _err("bad_param", "query 不能为空，必须传入 LogQL 表达式，如 '{namespace=\"saas-test-new\"} |= \"xxx\"'")
+    try:
+        ds_name = loki.resolve_datasource(region, env)
+    except loki.LokiError as e:
+        return _err("config", str(e), retryable=False)
     client = loki._get_client(region)
-    uid = client.resolve_uid(ds_name)
+    try:
+        uid = client.resolve_uid(ds_name)
+    except loki.LokiError as e:
+        return _err("loki_auth", str(e), retryable=True)
 
     warning = loki.warn_unscoped(query)
 
@@ -115,10 +201,10 @@ def obs_log_query(
         resp = client.loki_query_range(uid, query, start, end, limit, direction)
     except loki.LokiError as e:
         hint = _timeout_hint(start, end)
-        return _json({"error": f"{e}{hint}"})
+        return _err("loki_query", f"{e}{hint}", retryable=True)
 
     if resp.get("status") != "success":
-        return _json({"error": f"Loki 查询失败: {json.dumps(resp)[:500]}"})
+        return _err("loki_query", f"Loki 查询失败: {json.dumps(resp)[:500]}", retryable=True)
 
     rows = []
     for stream in resp.get("data", {}).get("result", []):
@@ -130,7 +216,7 @@ def obs_log_query(
 
     rows.sort(key=lambda r: r["ts"], reverse=(direction == "BACKWARD"))
     top = rows[:limit]
-    return _json({
+    return _ok({
         "region": region,
         "env": env,
         "datasource": ds_name,
@@ -140,7 +226,7 @@ def obs_log_query(
         "total": len(rows),
         **({"warning": warning} if warning else {}),
         "results": [{"time": fmt(r["ts"]), "line": r["line"][:400]} for r in top],
-    })
+    }, "loki")
 
 
 @mcp.tool()
@@ -175,11 +261,11 @@ def obs_log_trace(
     direction：BACKWARD（默认，从最近往回，先看最新）| FORWARD（从最早开始）。
     """
     if region not in LOKI_PLATFORMS:
-        return _json({"error": f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）"})
+        return _err("bad_param", f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）")
     try:
         loki.resolve_datasource(region, env)
     except loki.LokiError as e:
-        return _json({"error": str(e)})
+        return _err("config", str(e), retryable=False)
 
     start, end = _time_bounds(from_time, to_time, time_range)
     limit = max(1, min(int(limit), 5000))
@@ -189,18 +275,18 @@ def obs_log_trace(
             level=level, clip_len=clip_len,
         )
     except loki.LokiError as e:
-        return _json({"error": f"{e}{_timeout_hint(start, end)}"})
+        return _err("loki_query", f"{e}{_timeout_hint(start, end)}", retryable=True)
 
     def fmt(sec: int) -> str:
         return datetime.fromtimestamp(sec, BJ).strftime("%Y-%m-%d %H:%M:%S")
 
-    return _json({
+    return _ok({
         **meta,
         "start": fmt(start),
         "end": fmt(end),
         "total": len(rows),
         "results": [{"time": fmt(r["ts_ns"] // 1_000_000_000), "line": r["line"]} for r in rows],
-    })
+    }, "loki")
 
 
 @mcp.tool()
@@ -211,10 +297,13 @@ def obs_log_datasources(region: str) -> str:
     返回真实 datasource 名称，不需要手工猜测或把 Grafana 页面名称写进 LogQL。
     """
     if region not in LOKI_PLATFORMS:
-        return _json({"error": f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）"})
+        return _err("bad_param", f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）")
     client = loki._get_client(region)
-    ds_list = client.discover_loki_datasources()
-    return _json({
+    try:
+        ds_list = client.discover_loki_datasources()
+    except loki.LokiError as e:
+        return _err("loki_auth", str(e), retryable=True)
+    return _ok({
         "region": region,
         "label": LOKI_PLATFORMS[region]["label"],
         "count": len(ds_list),
@@ -222,7 +311,7 @@ def obs_log_datasources(region: str) -> str:
             {"id": d.get("id"), "uid": d.get("uid"), "name": d.get("name"), "isDefault": d.get("isDefault")}
             for d in ds_list
         ],
-    })
+    }, "loki")
 
 
 # ============================================================================
@@ -248,9 +337,9 @@ def archery_query(
         db_name = db or ARCHERY_DEFAULT_DB
         client = archery.ArcheryClient(site)
         result = client.query(sql, instance_name, db_name, max(1, min(int(limit), 5000)))
-        return _json({"site": site, "instance": instance_name, "db": db_name, **result})
+        return _ok({"site": site, "instance": instance_name, "db": db_name, **result}, "archery")
     except archery.ArcheryError as e:
-        return _json({"error": str(e)})
+        return _err("archery_query", str(e), retryable=True)
 
 
 @mcp.tool()
@@ -270,9 +359,9 @@ def archery_describe_table(
         db_name = db or ARCHERY_DEFAULT_DB
         client = archery.ArcheryClient(site)
         result = client.describe_table(instance_name, db_name, table)
-        return _json({"site": site, "instance": instance_name, "db": db_name, **result})
+        return _ok({"site": site, "instance": instance_name, "db": db_name, **result}, "archery")
     except archery.ArcheryError as e:
-        return _json({"error": str(e)})
+        return _err("archery_query", str(e), retryable=True)
 
 
 @mcp.tool()
@@ -292,9 +381,9 @@ def archery_list_columns(
         db_name = db or ARCHERY_DEFAULT_DB
         client = archery.ArcheryClient(site)
         columns = client.list_columns(instance_name, db_name, table)
-        return _json({"site": site, "instance": instance_name, "db": db_name, "table": table, "columns": columns})
+        return _ok({"site": site, "instance": instance_name, "db": db_name, "table": table, "columns": columns}, "archery")
     except archery.ArcheryError as e:
-        return _json({"error": str(e)})
+        return _err("archery_query", str(e), retryable=True)
 
 
 @mcp.tool()
@@ -314,9 +403,9 @@ def archery_query_tenant(
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
         result = archery.query_tenant(site, tenant or None, instance_name, db_name)
-        return _json({"site": site, "instance": instance_name, "db": db_name, **result})
+        return _ok({"site": site, "instance": instance_name, "db": db_name, **result}, "archery")
     except archery.ArcheryError as e:
-        return _json({"error": str(e)})
+        return _err("archery_query", str(e), retryable=True)
 
 
 @mcp.tool()
@@ -332,9 +421,9 @@ def archery_list_databases(
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         result = archery.query_db_list(site, instance_name)
-        return _json({"site": site, "instance": instance_name, **result})
+        return _ok({"site": site, "instance": instance_name, **result}, "archery")
     except archery.ArcheryError as e:
-        return _json({"error": str(e)})
+        return _err("archery_query", str(e), retryable=True)
 
 
 @mcp.tool()
@@ -344,13 +433,13 @@ def archery_list_instances() -> str:
     返回结构明确标注每个别名归属的 site（cn/aws），调用方据此显式传 site，
     避免「用 cn 站点查 aws 实例」导致的「未关联该实例」歧义错误。
     """
-    return _json({
+    return _ok({
         "instances_by_site": ARCHERY_INSTANCE_ALIASES,
         "default_site": "cn",
         "default_db": ARCHERY_DEFAULT_DB,
         "note": "查询实例时须同时传对应 site（如 aws 实例传 site=\"aws\"），"
                 "仅传 instance 而不传 site 会按默认 site=cn 解析而报「未关联该实例」。",
-    })
+    }, "archery")
 
 
 # ============================================================================
@@ -360,9 +449,16 @@ def archery_list_instances() -> str:
 def _choerodon_call(dispatch_name: str, **kwargs) -> str:
     try:
         fn = choerodon.CHOERODON_DISPATCH[dispatch_name]
-        return _json(fn(**kwargs))
-    except Exception as e:  # 认证/网络/解析等一律优雅返回,不抛 500
-        return _json({"error": f"{type(e).__name__}: {e}"})
+        data = fn(**kwargs)
+        if isinstance(data, dict) and data.get("ok") is False:
+            # 底层返回的显式失败（如写操作前置校验失败），透传其错误信息
+            return _err("choerodon", data.get("note") or str(data), retryable=False)
+        return _ok(data, "choerodon")
+    except choerodon.ChoerodonError as e:
+        # 认证/网络/解析等可重试错误
+        return _err("choerodon", str(e), retryable=True)
+    except Exception as e:  # 其它未知异常,不抛 500
+        return _err("choerodon", f"{type(e).__name__}: {e}", retryable=False)
 
 
 @mcp.tool()
@@ -475,12 +571,12 @@ def search_repo(
     context 为内容搜索上下文行数,depth 为递归深度。
     """
     try:
-        return _json(search.search_repo(
+        return _ok(search.search_repo(
             keyword, mode=mode, max_results=max_results,
             context=context, depth=depth,
-        ))
+        ), "local-repo")
     except Exception as e:  # 文件系统错误等
-        return _json({"error": str(e)})
+        return _err("search_repo", str(e), retryable=False)
 
 
 # ============================================================================
@@ -507,14 +603,18 @@ def gitlab_search_projects(query: str, per_page: int = 20) -> str:
             }
             for p in items
         ]
-        return _json({"count": len(slim), "projects": slim})
+        return _ok({"count": len(slim), "projects": slim}, "gitlab")
     except gitlab.GitLabError as e:
-        return _json({"error": str(e)})
+        return _err("gitlab", str(e), retryable=True)
 
 
 @mcp.tool()
 def gitlab_search_code(query: str, per_page: int = 20) -> str:
     """GitLab 代码搜索（在配置的搜索根 group/project 下按关键词检索 blob）。
+
+    说明：自托管 GitLab 若未开启全局代码搜索索引，根 /search?scope=blobs 会返回 400，
+    此时本工具会**自动退化为仓库级搜索**（遍历搜索根 group 下各 project 调
+    repository/search?scope=blobs），仍可按关键词查找源码，但更慢且限定在配置的 group 内。
 
     何时调用：知道类名、方法名、错误文本或配置键但不知道文件位置时；返回命中
     项目、路径、分支和行号，随后用 gitlab_get_file 读取完整文件核对上下文。
@@ -529,13 +629,14 @@ def gitlab_search_code(query: str, per_page: int = 20) -> str:
                 "path": r.get("path"),
                 "filename": r.get("filename"),
                 "startline": r.get("startline"),
+                "data": (r.get("data") or "")[:300],
                 "ref": r.get("ref"),
             }
             for r in results
         ]
-        return _json({"count": len(slim), "results": slim})
+        return _ok({"count": len(slim), "results": slim}, "gitlab")
     except gitlab.GitLabError as e:
-        return _json({"error": str(e)})
+        return _err("gitlab", str(e), retryable=True)
 
 
 @mcp.tool()
@@ -547,9 +648,9 @@ def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
     """
     try:
         content = gitlab.GitLabClient().get_file(project_id, path, ref=ref)
-        return _json({"project_id": project_id, "path": path, "ref": ref, "content": content})
+        return _ok({"project_id": project_id, "path": path, "ref": ref, "content": content}, "gitlab")
     except gitlab.GitLabError as e:
-        return _json({"error": str(e)})
+        return _err("gitlab", str(e), retryable=True)
 
 
 @mcp.tool()
@@ -569,9 +670,9 @@ def gitlab_list_tree(
         items = gitlab.GitLabClient().list_tree(
             project_id, path=path, ref=ref, recursive=recursive, per_page=per_page
         )
-        return _json({"count": len(items), "tree": items})
+        return _ok({"count": len(items), "tree": items}, "gitlab")
     except gitlab.GitLabError as e:
-        return _json({"error": str(e)})
+        return _err("gitlab", str(e), retryable=True)
 
 
 @mcp.tool()
@@ -592,9 +693,9 @@ def gitlab_list_branches(project_id: str, per_page: int = 50) -> str:
             }
             for b in branches
         ]
-        return _json({"count": len(slim), "branches": slim})
+        return _ok({"count": len(slim), "branches": slim}, "gitlab")
     except gitlab.GitLabError as e:
-        return _json({"error": str(e)})
+        return _err("gitlab", str(e), retryable=True)
 
 
 # ============================================================================
@@ -667,7 +768,7 @@ def obs_sls_query(
                 query, start, end, sls_config.endpoint(), limit,
             )
             query_used = query
-        return _json({
+        return _ok({
             "meta": {
                 "system": target.system, "environment": target.environment,
                 "project": target.project, "logstore": target.logstore,
@@ -675,9 +776,9 @@ def obs_sls_query(
                 "query": query_used, "progress": progress, "count": len(logs),
             },
             "logs": logs,
-        })
+        }, "sls")
     except (ValueError, RuntimeError) as e:
-        return _json({"error": str(e)})
+        return _err("sls_query", str(e), retryable=True)
 
 
 # ============================================================================
@@ -796,9 +897,11 @@ def get_table(table_name: str, db_name: str = "") -> str:
 def get_table_relations(table_name: str) -> str:
     """获取某张表已沉淀的关联关系（只读）。
 
-    返回 from/to 表、join 条件、关系类型、描述和置信度；用于设计 JOIN 或
-    诊断数据链路。关系是知识库沉淀，不等于数据库约束，执行前仍应确认两端
-    字段存在并用 SELECT 验证结果。
+    返回 from/to 表、join 条件、关系类型、描述、置信度（confidence）、
+    是否已验证（verified）及来源（source）。用于设计 JOIN 或诊断数据链路。
+    可信度指引：优先采信 ``verified=true`` 且 ``source=archery_select`` 的关系；
+    未验证的关系仅作候选，执行前仍需用 archery_list_columns 确认两端字段存在，
+    并用 SELECT 验证 join 结果。关系是知识库沉淀，不等于数据库约束。
     """
     return kb.get_table_relations(table_name)
 
@@ -960,15 +1063,26 @@ def add_table_relation(
     confidence: float = 1.0,
     from_db: str = "srm",
     to_db: str = "srm",
+    verified: bool = False,
+    source: str = "manual",
 ) -> str:
-    """写入一条已验证的表关联关系（写操作，需用户确认，按键 upsert）。
+    """写入一条表关联关系（写操作，需用户确认，按键 upsert）。
 
     仅在 Archery/SELECT 验证两端字段和 join 结果后调用；``join_on`` 传可读
     的连接条件（如 ``a.order_id = b.order_id``），``confidence`` 范围 0~1，
-    ``from_db``/``to_db`` 用实际库名。该记录是知识库元数据，不创建数据库
-    外键，也不执行 join。
+    ``from_db``/``to_db`` 用实际库名。
+
+    可信度属性：
+      - ``verified=true``：已经 Archery/SELECT 实测验证过两端字段与 join 结果；
+        仅实测通过才置 true，否则保持 false 让 SQL Agent 谨慎使用。
+      - ``source``：来源枚举 archery_select(实测)/ddl(外键推断)/manual(人工)/inferred(自动推断)。
+    ``join_on`` 传可读的连接条件（如 ``a.order_id = b.order_id``），该记录是
+    知识库元数据，不创建数据库外键，也不执行 join。
     """
-    return kb.add_table_relation(from_table, to_table, join_on, relation_type, description, confidence, from_db, to_db)
+    return kb.add_table_relation(
+        from_table, to_table, join_on, relation_type, description,
+        confidence, from_db, to_db, verified=verified, source=source,
+    )
 
 
 @mcp.tool()
