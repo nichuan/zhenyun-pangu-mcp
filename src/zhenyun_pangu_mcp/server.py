@@ -951,6 +951,47 @@ def save_knowledge(
 
 
 @mcp.tool()
+def update_knowledge(
+    doc_id: int,
+    title: str = "",
+    content_md: str = "",
+    knowledge_type: str = "",
+    system: str = "",
+    module: str = "",
+    summary: str = "",
+    core_tables: str = "",
+    related_template_ids: str = "",
+    tags: str = "",
+    status: str = "",
+    source_type: str = "",
+) -> str:
+    """部分更新已有知识条目（写操作，需用户确认）。
+
+    先用 get_knowledge 确认 ``doc_id``，只传需要修改的字段。适合修正
+    正文/标题/归类、把核验过的知识标为 verified（verified_at 自动写入）、
+    或将过时知识标记 deprecated/archived（优于直接删除）。修改正文等
+    影响语义检索的字段时会自动重新生成 embedding。``core_tables``、
+    ``tags``、``related_template_ids`` 传逗号分隔值。只写认知层元数据，
+    不修改业务数据库。
+    """
+    return kb.update_knowledge(
+        doc_id, title, content_md, knowledge_type, system, module, summary,
+        core_tables, related_template_ids, tags, status, source_type,
+    )
+
+
+@mcp.tool()
+def delete_knowledge(doc_id: int) -> str:
+    """删除指定知识条目（破坏性写操作，必须用户明确确认）。
+
+    仅用于清理错误、重复或已彻底作废的知识；删除前先 get_knowledge 核对
+    id。若知识只是内容过时但仍有参考价值，建议改用 update_knowledge 置
+    status=deprecated/archived 而非物理删除。本操作不影响业务数据库。
+    """
+    return kb.delete_knowledge(doc_id)
+
+
+@mcp.tool()
 def save_sql_template(
     title: str,
     category: str,

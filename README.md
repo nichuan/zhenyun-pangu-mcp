@@ -37,7 +37,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 
 ## 能力总览
 
-工具按前缀/能力分组（共 43 个）：
+工具按前缀/能力分组（共 45 个）：
 
 | 前缀 | 工具 | 说明 |
 |------|------|------|
@@ -46,7 +46,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `table`（事实层） | `search_tables` / `get_table` / `get_table_relations` | 表目录 + 关联关系（沉淀于 table_catalog / table_relations） |
 | `search_pangu` | `search_pangu` | 统一搜索：一次检索 知识 + 模板 + 表 + 关系 |
 | `diagnose_context` | `diagnose_context` | 组合诊断：自动汇集 认知 → 模板 → 表 → 关系 的诊断上下文 |
-| 知识库维护写操作 | `save_knowledge` / `save_sql_template` / `list_sql_templates` / `update_sql_template` / `delete_sql_template` / `record_template_usage` / `add_table_relation` / `record_table_usage` / `upsert_table_knowledge` | 沉淀、维护知识/模板/表目录/关联关系；仅写认知层元数据，不修改业务库 |
+| 知识库维护写操作 | `save_knowledge` / `update_knowledge` / `delete_knowledge` / `save_sql_template` / `list_sql_templates` / `update_sql_template` / `delete_sql_template` / `record_template_usage` / `add_table_relation` / `record_table_usage` / `upsert_table_knowledge` | 沉淀、维护知识/模板/表目录/关联关系；仅写认知层元数据，不修改业务库 |
 | `obs_*` | `obs_log_query` / `obs_log_trace` / `obs_log_datasources` / `obs_sls_query` | 日志能力：Loki 双平台（aws 海外全环境 + cn 国内非生产）+ 阿里云 SLS（仅 cn 国内盘古 prod） |
 | `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` | 数据能力（Archery 双站点 cn/aws + 盘古专属租户/库/实例能力） |
 | `choerodon_*` | `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_add_comment` | 业务系统能力：猪齿鱼协作（内置 Python 客户端，纯 HTTP 登录；前 8 个为只读查询，`choerodon_add_comment` 为写操作，需确认） |
@@ -76,6 +76,12 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 - `save_knowledge(title, content_md, ...)`：沉淀已确认的规则、机制、排查结论或数据模型说明。
   `content_md` 使用规范 Markdown；`core_tables`、`tags`、`related_template_ids` 为逗号分隔字符串；
   默认 `status=draft`，核验后再标 `verified`。
+- `update_knowledge(doc_id, ...)`：只修改明确传入的字段，适合修正正文/标题/归类、把核验过的
+  知识标为 verified（`verified_at` 自动写入）或将过时知识标 `deprecated/archived`；修改正文等
+  影响语义检索的字段时会自动重新生成 embedding。过时但仍有参考价值的知识优先置
+  `deprecated/archived`，避免直接删除丢失上下文。
+- `delete_knowledge(doc_id)`：破坏性维护操作，仅清理错误、重复或彻底作废的知识，必须明确确认；
+  删除前先 `get_knowledge` 核对 id。
 - `save_sql_template(title, category, scenario, sql_text, ...)`：沉淀复杂查询或供人工确认的修复方案。
   `sql_text` 只写入模板库，不会被 MCP 执行；`parameters` 必须是 JSON 对象字符串，例如
   `{"tenant_id":{"type":"bigint","required":true}}`。

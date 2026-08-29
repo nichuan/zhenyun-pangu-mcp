@@ -374,6 +374,86 @@ def save_knowledge(
         return _err(e)
 
 
+def update_knowledge(
+    doc_id: int, title: str = "", content_md: str = "", knowledge_type: str = "",
+    system: str = "", module: str = "", summary: str = "", core_tables: str = "",
+    related_template_ids: str = "", tags: str = "", status: str = "", source_type: str = "",
+) -> str:
+    """部分更新已有知识条目（修正正文/标题/归类、补充核验状态等）。"""
+    try:
+        existing = repo.get_knowledge(int(doc_id))
+        if not existing:
+            return f"⚠️ 未找到 id={doc_id} 的知识，先用 get_knowledge 确认 doc_id。"
+        payload: dict[str, Any] = {}
+        if title:
+            payload["title"] = title
+        if content_md:
+            payload["content_md"] = content_md
+        if knowledge_type:
+            if knowledge_type not in repo.VALID_KNOWLEDGE_TYPES:
+                return f"⚠️ knowledge_type 非法：{knowledge_type}（可选 {', '.join(repo.VALID_KNOWLEDGE_TYPES)}）。"
+            payload["knowledge_type"] = knowledge_type
+        if system:
+            payload["system"] = system.strip()
+        if module:
+            payload["module"] = module.strip()
+        if summary:
+            payload["summary"] = summary.strip()
+        if core_tables:
+            payload["core_tables"] = _split(core_tables) or []
+        if related_template_ids:
+            parsed_ids = _split_ids(related_template_ids)
+            if parsed_ids is None:
+                return "⚠️ related_template_ids 格式非法（应为逗号分隔数字，如 1,2），未更新。"
+            payload["related_template_ids"] = parsed_ids
+        if tags:
+            payload["tags"] = _split(tags) or []
+        if status:
+            if status not in repo.VALID_KNOWLEDGE_STATUS:
+                return f"⚠️ status 非法：{status}（可选 {', '.join(repo.VALID_KNOWLEDGE_STATUS)}）。"
+            payload["status"] = status
+        if source_type:
+            payload["source_type"] = source_type
+        if not payload:
+            return "⚠️ 未提供需要更新的字段。"
+        if payload.get("status") == "verified":
+            payload["verified_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # 修改影响语义向量的字段时，基于「现有行 + 变更字段」合并后重新生成 embedding
+        vector_fields = {"title", "content_md", "knowledge_type", "system", "module", "summary", "core_tables", "tags"}
+        if sb.embedding.available and vector_fields & payload.keys():
+            merged = {
+                "title": payload.get("title") or existing.get("title") or "",
+                "knowledge_type": payload.get("knowledge_type") or existing.get("knowledge_type") or "",
+                "system": payload.get("system") or existing.get("system") or "",
+                "module": payload.get("module") or existing.get("module") or "",
+                "summary": payload.get("summary") or existing.get("summary") or "",
+                "tags": payload.get("tags") if "tags" in payload else (existing.get("tags") or []),
+                "core_tables": payload.get("core_tables") if "core_tables" in payload else (existing.get("core_tables") or []),
+                "content_md": payload.get("content_md") or existing.get("content_md") or "",
+            }
+            emb = sb.embedding.embed_knowledge(merged)
+            if emb is not None:
+                payload["embedding"] = sb.embedding.to_literal(emb)
+        row = repo.update_knowledge(int(doc_id), payload)
+        return f"✅ 知识 id={doc_id} 已更新。\n\n" + (fmt_knowledge(row) if row else "（无返回行）")
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+def delete_knowledge(doc_id: int) -> str:
+    """删除指定知识条目（清理错误/重复知识；谨慎，仅维护场景使用）。"""
+    try:
+        existing = repo.get_knowledge(int(doc_id))
+        if not existing:
+            return f"⚠️ 未找到 id={doc_id} 的知识。"
+        ok = repo.delete_knowledge(int(doc_id))
+        if not ok:
+            return f"⚠️ 删除知识 id={doc_id} 未生效，请重试或检查权限。"
+        return f"✅ 已删除知识 id={doc_id}（{existing.get('title', '')}）。"
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 def save_sql_template(
     title: str, category: str, scenario: str, sql_text: str, keywords: str = "",
     core_tables: str = "", verified: bool = False, template_no: str = "", system: str = "",
