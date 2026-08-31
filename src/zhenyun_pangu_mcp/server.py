@@ -1,7 +1,7 @@
 """zhenyun-pangu-mcp — 甄云盘古通用工具 MCP（完全自包含，无外部仓库依赖）。
 
 工具按前缀分组：
-  - obs_*       日志查询（Loki 双平台 aws/cn + 阿里云 SLS 仅 cn 盘古 prod）
+  - obs_*       日志查询（阿里云 SLS：国内公有云盘古 prod/dev/test；Loki：仅 AWS 海外）
   - archery_*   数据库查询（Archery 双站点 cn/aws + 盘古专属租户/实例/库列表）
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
   - search_repo 跨仓代码搜索（内置纯标准库文件遍历，零外部依赖）
@@ -14,6 +14,7 @@ GitLab/猪齿鱼获取当前事实；认知层写工具只沉淀用户确认后�
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -45,6 +46,7 @@ _SOURCE_MAP = {
     "obs_log_trace": "loki",
     "obs_log_datasources": "loki",
     "obs_sls_query": "sls",
+    "obs_sls_targets": "sls",
     "archery_query": "archery",
     "archery_describe_table": "archery",
     "archery_list_columns": "archery",
@@ -117,28 +119,58 @@ def _ok(data: object, source: str) -> str:
 # ============================================================================
 
 def _time_bounds(from_time: int | None, to_time: int | None, time_range: str) -> tuple[int, int]:
+    """统一时间窗解析（Loki 与 SLS 共用，避免两套实现语义漂移）。
+
+    支持三种入参：
+      1. from_time/to_time（秒级时间戳，传任一即可，缺省侧按 2 小时补齐）；
+      2. 相对时间：中英文皆可 —— 30m/2h/1d、最近30分钟/最近2小时/最近3天；
+      3. 自然语言：今天/昨天/前天/本周/上周/本月/上月（today/yesterday 亦可）；
+      4. 绝对时间："YYYY-MM-DD HH:mm~HH:mm"（按北京时间解析）。
+    """
     now = int(time.time())
     if from_time is not None or to_time is not None:
         end = int(to_time if to_time is not None else now)
         return int(from_time if from_time is not None else end - 7200), end
 
-    text = (time_range or "2h").strip().lower()
+    raw = (time_range or "2h").strip().lower()
+    text = raw.replace(" ", "")
     current = datetime.now(BJ)
     today = current.replace(hour=0, minute=0, second=0, microsecond=0)
-    if text == "today":
+    if text in {"today", "今天", "今日"}:
         return int(today.timestamp()), now
-    if text == "yesterday":
+    if text in {"yesterday", "昨天"}:
         return int((today - timedelta(days=1)).timestamp()), int(today.timestamp() - 1)
-    import re
-
+    if text in {"前天", "前日"}:
+        start = today - timedelta(days=2)
+        return int(start.timestamp()), int((start + timedelta(days=1)).timestamp() - 1)
+    if text in {"本周", "这周", "本星期"}:
+        start = today - timedelta(days=current.weekday())
+        return int(start.timestamp()), now
+    if text in {"上周", "上一周"}:
+        week_end = today - timedelta(days=current.weekday())
+        start = week_end - timedelta(days=7)
+        return int(start.timestamp()), int(week_end.timestamp() - 1)
+    if text in {"本月", "这个月"}:
+        return int(today.replace(day=1).timestamp()), now
+    if text in {"上月", "上个月"}:
+        month_end = today.replace(day=1)
+        start = (month_end - timedelta(days=1)).replace(day=1)
+        return int(start.timestamp()), int(month_end.timestamp() - 1)
+    # 相对时间（英文）：30m / 2h / 1d
     rel = re.match(r"^(\d+)(m|h|d)$", text)
     if rel:
         n = int(rel.group(1))
         seconds = {"m": 60, "h": 3600, "d": 86400}[rel.group(2)]
         return now - n * seconds, now
-    # 绝对时间 "YYYY-MM-DD HH:mm~HH:mm"
-    if "~" in text:
-        parts = text.split("~")
+    # 相对时间（中文）：最近30分钟 / 最近2小时 / 最近3天
+    for unit, seconds in (("分钟", 60), ("小时", 3600), ("天", 86400)):
+        if unit in text:
+            number = "".join(c for c in text.split(unit)[0] if c.isdigit())
+            if number:
+                return now - int(number) * seconds, now
+    # 绝对时间 "YYYY-MM-DD HH:mm~HH:mm"（保留空格，避免 strptime 解析失败）
+    if "~" in raw:
+        parts = raw.split("~")
         start = int(datetime.strptime(parts[0].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=BJ).timestamp())
         end = int(datetime.strptime(parts[1].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=BJ).timestamp())
         return start, end
@@ -153,13 +185,33 @@ def _timeout_hint(start: int, end: int) -> str:
     return "（查询失败，请确认 query 是否正确、env 是否来自 obs_log_datasources）"
 
 
+# 国内公有云盘古日志已迁回阿里云 SLS（prod/dev/test 全覆盖），Loki 仅保留 AWS 海外。
+# 传 region="cn" 时给出明确的可执行提示，避免 Agent 反复用错误工具重试。
+_CN_LOKI_HINT = (
+    "国内公有云(cn)盘古日志已全部迁回阿里云 SLS，Loki(obs_log_*)仅支持 AWS 海外；"
+    "查国内盘古请用 obs_sls_query(environment=\"prod\"|\"dev\"|\"test\")。"
+)
+
+
+def _check_loki_region(region: str) -> str | None:
+    """校验 Loki 的 region 参数；不合法时返回统一错误串，合法返回 None。"""
+    if region in LOKI_PLATFORMS:
+        return None
+    if region == "cn":
+        return _err("bad_param", _CN_LOKI_HINT)
+    return _err(
+        "bad_param",
+        f"未知 region: {region}（Loki 仅支持 {list(LOKI_PLATFORMS)}）；{_CN_LOKI_HINT}",
+    )
+
+
 # ============================================================================
 # obs_* 日志工具
 # ============================================================================
 
 @mcp.tool()
 def obs_log_query(
-    region: str = "cn",
+    region: str = "aws",
     env: str = "nonprod",
     query: str = "",
     time_range: str = "2h",
@@ -168,21 +220,24 @@ def obs_log_query(
     limit: int = 50,
     direction: str = "BACKWARD",
 ) -> str:
-    """查询日志（Loki）。
+    """查询 Loki 日志（仅 AWS 海外 jp-saas-1；国内盘古请改用 obs_sls_query）。
 
-    区分两套平台：region=aws 查 AWS 海外(jp-saas-1)，region=cn 查国内公有云。
-    国内非 prod 已切换至 Loki 风格，地址 logs.going-link.net。
+    适用范围：region=aws（AWS 海外 jp-saas-1，prod/nonprod/ops 全环境）。
+    ⚠️ 国内公有云(cn)盘古日志（prod/dev/test）已迁回阿里云 SLS，本工具不再支持
+    region=cn；查国内盘古请用 obs_sls_query(environment="prod"/"dev"/"test")。
+
     query 为 LogQL 表达式，如 '{app="srm-gateway"} |= "403"'。
-    time_range 支持 30m/2h/1d/today/yesterday 或 "YYYY-MM-DD HH:mm~HH:mm"（北京时间）。
+    time_range 支持 30m/2h/1d、今天/昨天/本周 或 "YYYY-MM-DD HH:mm~HH:mm"（北京时间）。
 
     注：MCP 直接调 Loki HTTP API，query 即 LogQL 字符串；与「用户手册」在
     Grafana 页面手工选 namespace/app 缩小范围不同，这里必须在 query 中显式写
-    标签过滤（如 {namespace="saas-test-new"}），否则将扫描全部数据流（见 warning）。
+    标签过滤（如 {namespace="..."}），否则将扫描全部数据流（见 warning）。
     """
-    if region not in LOKI_PLATFORMS:
-        return _err("bad_param", f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）")
+    region_error = _check_loki_region(region)
+    if region_error:
+        return region_error
     if not query or not query.strip():
-        return _err("bad_param", "query 不能为空，必须传入 LogQL 表达式，如 '{namespace=\"saas-test-new\"} |= \"xxx\"'")
+        return _err("bad_param", "query 不能为空，必须传入 LogQL 表达式，如 '{app=\"srm-gateway\"} |= \"xxx\"'")
     try:
         ds_name = loki.resolve_datasource(region, env)
     except loki.LokiError as e:
@@ -232,7 +287,7 @@ def obs_log_query(
 @mcp.tool()
 def obs_log_trace(
     trace_id: str,
-    region: str = "cn",
+    region: str = "aws",
     env: str = "nonprod",
     time_range: str = "2h",
     from_time: int | None = None,
@@ -242,26 +297,28 @@ def obs_log_trace(
     level: str = "all",
     clip_len: int = 600,
 ) -> str:
-    """按 traceId 查整条调用链日志（Loki，单查询优先、最多 2 次 HTTP，根治超时）。
+    """按 traceId 查整条调用链日志（Loki，仅 AWS 海外；国内盘古用 obs_sls_query）。
+
+    ⚠️ 国内公有云(cn)盘古日志（prod/dev/test）已迁回阿里云 SLS，本工具不再支持
+    region=cn；查国内盘古链路请用 obs_sls_query(trace_id=..., environment=...)。
 
     推荐优先用本工具替代 obs_log_query+手写 query 来追链路，自动处理：
     按正文子串匹配 traceId（覆盖 `[xxx]` / `traceId=xxx` / `trace_id: xxx`，
     不写死字段前缀），带 namespace 限定取全链路按时间排序还原调用链；带 ns 查
     为 0 时自动降级为不限 namespace 重查一次。ERROR/WARN 行已包含在结果中，
     meta.error_count / warn_count 给出数量，无需单独再查。
-    防 TOKEN 膨胀（本次新增）：
+    防 TOKEN 膨胀：
     - level：all（默认，全量）/ error（仅 ERROR 级）/ warn（WARN+ERROR 级）。
       排障时建议先用 level=error 或 level=warn 只取异常行，能省 80%+ token。
     - clip_len：每条日志行内容截断长度（默认 600，可调小到 200 更省 token）。
     - meta.truncated：命中行数达到 limit 时为 true，提示结果可能被截断，可调大 limit。
-    默认 region=cn, env=nonprod（对应「test 环境」= namespace=saas-test-new）。
-    注意：手册里「test 环境」在 API 层面对应 env=nonprod（LOKI_DATASOURCES 的 cn
-    只有 prod/nonprod/ops），namespace 由 env 推导：nonprod->saas-test-new、prod->saas-prod。
-    若实际 namespace 不同，请改用 obs_log_query 显式指定 {namespace="..."}。
+    默认 region=aws, env=nonprod；env 取值以 obs_log_datasources(region) 返回的
+    真实数据源键为准（aws 下为 prod/nonprod/ops）。
     direction：BACKWARD（默认，从最近往回，先看最新）| FORWARD（从最早开始）。
     """
-    if region not in LOKI_PLATFORMS:
-        return _err("bad_param", f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）")
+    region_error = _check_loki_region(region)
+    if region_error:
+        return region_error
     try:
         loki.resolve_datasource(region, env)
     except loki.LokiError as e:
@@ -290,14 +347,16 @@ def obs_log_trace(
 
 
 @mcp.tool()
-def obs_log_datasources(region: str) -> str:
-    """列出指定日志平台的 Loki 数据源（只读）。
+def obs_log_datasources(region: str = "aws") -> str:
+    """列出指定日志平台的 Loki 数据源（只读，仅 AWS 海外）。
 
-    何时调用：不知道 ``env`` 对应的数据源名称，或需要确认 cn/aws 平台连通性时；
+    何时调用：不知道 ``env`` 对应的数据源名称，或需要确认 aws 平台连通性时；
     返回真实 datasource 名称，不需要手工猜测或把 Grafana 页面名称写进 LogQL。
+    ⚠️ 国内公有云盘古日志已迁回阿里云 SLS（prod/dev/test 全覆盖），无 cn 数据源。
     """
-    if region not in LOKI_PLATFORMS:
-        return _err("bad_param", f"未知 region: {region}（可选 {list(LOKI_PLATFORMS)}）")
+    region_error = _check_loki_region(region)
+    if region_error:
+        return region_error
     client = loki._get_client(region)
     try:
         ds_list = client.discover_loki_datasources()
@@ -699,28 +758,23 @@ def gitlab_list_branches(project_id: str, per_page: int = 50) -> str:
 
 
 # ============================================================================
-# obs_sls_* 阿里云 SLS 日志（仅 cn 国内盘古 prod；非生产走 Loki）
+# obs_sls_* 阿里云 SLS 日志（国内公有云盘古 prod + 非生产 dev/test 全覆盖）
 # ============================================================================
 
-def _time_bounds_sls(from_time: int | None, to_time: int | None, time_range: str) -> tuple[int, int]:
-    """解析 SLS 时间范围,支持 from/to(秒时间戳)或自然语言(分钟/小时/天)。"""
-    now = int(time.time())
-    if from_time is not None or to_time is not None:
-        end = int(to_time if to_time is not None else now)
-        return int(from_time if from_time is not None else end - 7200), end
-    text = (time_range or "最近2小时").strip().lower().replace(" ", "")
-    current = datetime.now(BJ)
-    today = current.replace(hour=0, minute=0, second=0, microsecond=0)
-    if text in {"今天", "今日"}:
-        return int(today.timestamp()), now
-    if text == "昨天":
-        return int((today - timedelta(days=1)).timestamp()), int(today.timestamp() - 1)
-    for unit, seconds in (("分钟", 60), ("小时", 3600), ("天", 86400)):
-        if unit in text:
-            number = "".join(c for c in text.split(unit)[0] if c.isdigit())
-            if number:
-                return now - int(number) * seconds, now
-    return now - 7200, now
+# 默认时间窗（未显式指定时间时，先按 2 小时查；0 命中再自动扩窗）
+_DEFAULT_SLS_RANGES = {"最近2小时", "2h", ""}
+# 自动扩窗的备用窗口：最近 24h、最近 72h
+_EXPAND_WINDOWS_HOURS = (24, 72)
+
+
+def _clip_logs(logs: list[dict], clip_len: int) -> list[dict]:
+    """按 clip_len 裁剪每条日志的字符串字段（0 表示不裁剪），防止长堆栈撑爆 token。"""
+    if clip_len <= 0:
+        return logs
+    return [
+        {key: (value[:clip_len] if isinstance(value, str) else value) for key, value in log.items()}
+        for log in logs
+    ]
 
 
 @mcp.tool()
@@ -734,51 +788,100 @@ def obs_sls_query(
     to_time: int = 0,
     time_range: str = "最近2小时",
     limit: int = 200,
+    auto_expand: bool = True,
+    clip_len: int = 2000,
 ) -> str:
-    """查询阿里云 SLS 日志（仅 cn 国内盘古 prod 用阿里云日志；非生产请走 Loki）。
+    """查询国内公有云（cn）阿里云 SLS 日志：盘古 prod + 非生产 dev/test 全覆盖。
 
-    仅 environment=prod 适用（project=pangu-cn-saas-3-prod-shared-sls-project-0）。
-    盘古 dev/test 等非生产环境日志在 Loki，应使用 obs_log_query(region="cn")。
-    传入 trace_id 做「ERROR/WARN + 全链路」两阶段查询;否则用 keyword,
-    自动加上 _namespace_ 过滤。level 默认 ERROR(传空则不过滤级别)。
+    环境路由（system="盘古"，由 MCP 完成 project/logstore/namespace 映射，调用方不接触 AK）：
+      - prod → pangu-cn-saas-3-prod-shared-sls-project-0 / saas-prod
+      - dev  → pangu-cn-saas-3-nonprod-shared-sls-project-0 / saas-dev-new
+      - test → pangu-cn-saas-3-nonprod-shared-sls-project-0 / saas-test-new
+    盘古非生产(dev/test)曾短暂迁移到 Loki，现已迁回阿里云 SLS，统一用本工具；
+    obs_log_*（Loki）只保留 AWS 海外(jp-saas-1)。
+
+    用法：
+      - trace_id：按 traceId 做「ERROR/WARN + 全链路」两阶段查询（传了则优先于 keyword）。
+      - keyword：SLS 查询子句（与 _namespace_ 过滤 AND 组合），如 'content: "订单不存在"'。
+      - level：默认 ERROR；传空字符串表示不过滤级别。
+      - time_range：最近30分钟/最近2小时/最近3天、今天/昨天/前天/本周/上周/本月/上月，
+        或 30m/2h/1d，或 "YYYY-MM-DD HH:mm~HH:mm"（北京时间）。
+      - auto_expand：未显式指定时间窗且 0 命中时，自动扩到最近 24h、72h 各重试一次，
+        实际尝试过的窗口在 meta.attempted_windows 中返回（SLS 时间对齐偏差大时很有用）。
+      - clip_len：每条日志字段截断长度（默认 2000，0 表示不裁剪）。
     """
     try:
         target = sls_config.resolve_target(system, environment)
         ak_id, ak_secret = sls_config.credentials(target)
         limit = max(1, min(int(limit), 500))
-        if from_time or to_time:
-            start, end = _time_bounds_sls(from_time or None, to_time or None, "")
-        else:
-            start, end = _time_bounds_sls(None, None, time_range)
+        start, end = _time_bounds(from_time or None, to_time or None, time_range)
+
+        normalized_range = (time_range or "").strip().lower().replace(" ", "")
+        explicit_window = bool(from_time or to_time) or normalized_range not in _DEFAULT_SLS_RANGES
+        windows = [(start, end)]
+        if auto_expand and not explicit_window:
+            windows.extend([(end - hours * 3600, end) for hours in _EXPAND_WINDOWS_HOURS])
+
         clauses = [f"_namespace_: {target.namespace}"]
         if level:
             clauses.append(f"level: {level}")
         if keyword:
             clauses.append(keyword)
         query = " AND ".join(clauses)
-        if trace_id:
-            logs, progress = sls.query_trace(
-                target.project, target.logstore, ak_id, ak_secret,
-                trace_id, target.namespace, start, end, sls_config.endpoint(), limit,
-            )
-            query_used = f'"{trace_id}" AND _namespace_: {target.namespace}'
-        else:
-            logs, progress = sls.query_sls(
-                target.project, target.logstore, ak_id, ak_secret,
-                query, start, end, sls_config.endpoint(), limit,
-            )
-            query_used = query
+
+        attempted_windows: list[dict] = []
+        logs: list[dict] = []
+        progress = "Complete"
+        for window_start, window_end in windows:
+            attempted_windows.append({"from_time": window_start, "to_time": window_end})
+            if trace_id:
+                logs, progress = sls.query_trace(
+                    target.project, target.logstore, ak_id, ak_secret,
+                    trace_id, target.namespace, window_start, window_end,
+                    sls_config.endpoint(), limit,
+                )
+                query_used = f'"{trace_id}" AND _namespace_: {target.namespace}'
+            else:
+                logs, progress = sls.query_sls(
+                    target.project, target.logstore, ak_id, ak_secret,
+                    query, window_start, window_end, sls_config.endpoint(), limit,
+                )
+                query_used = query
+            if logs or progress == "Incomplete":
+                break
+
+        used_start, used_end = attempted_windows[-1]["from_time"], attempted_windows[-1]["to_time"]
         return _ok({
             "meta": {
                 "system": target.system, "environment": target.environment,
                 "project": target.project, "logstore": target.logstore,
-                "namespace": target.namespace, "from_time": start, "to_time": end,
+                "namespace": target.namespace,
+                "from_time": used_start, "to_time": used_end,
+                "from_time_bj": datetime.fromtimestamp(used_start, BJ).strftime("%Y-%m-%d %H:%M:%S"),
+                "to_time_bj": datetime.fromtimestamp(used_end, BJ).strftime("%Y-%m-%d %H:%M:%S"),
                 "query": query_used, "progress": progress, "count": len(logs),
+                "auto_expanded": len(attempted_windows) > 1,
+                "attempted_windows": attempted_windows,
+                "clip_len": clip_len,
             },
-            "logs": logs,
+            "logs": _clip_logs(logs, clip_len),
         }, "sls")
     except (ValueError, RuntimeError) as e:
         return _err("sls_query", str(e), retryable=True)
+
+
+@mcp.tool()
+def obs_sls_targets() -> str:
+    """列出阿里云 SLS 支持的系统/环境映射（只读，不含凭据）。
+
+    何时调用：不确定国内盘古到底支持哪些 ``environment``（prod/dev/test）时；
+    返回 system/environment → project/logstore/namespace 的真实映射，
+    避免凭空猜测环境名。AWS 海外日志不走 SLS，请用 obs_log_datasources(region="aws")。
+    """
+    return _ok({
+        "note": "国内公有云盘古 prod 与非生产 dev/test 均在阿里云 SLS；Loki(obs_log_*)仅 AWS 海外。",
+        "targets": sls_config.supported_targets(),
+    }, "sls")
 
 
 # ============================================================================

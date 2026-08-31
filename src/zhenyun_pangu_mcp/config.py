@@ -79,7 +79,12 @@ if _alias_env:
 ARCHERY_DEFAULT_DB = os.getenv("ARCHERY_DEFAULT_DB", "srm")
 
 # ---------------------------------------------------------------------------
-# Loki 日志(双平台:aws 海外 / cn 国内,各自独立凭据)
+# Loki 日志(仅 AWS 海外 jp-saas-1)
+#
+# 路由现状(2026-08)：国内公有云盘古日志(prod/dev/test 全部环境)已迁回阿里云 SLS，
+# 由 sls_config.py 按环境映射 project/logstore/namespace；Loki 只服务 AWS 海外。
+# 盘古非生产曾短暂迁移到 Loki(logs.going-link.net)，现相关配置(LOKI_API_BASE_CN /
+# CN_LOG_* / CN_LOG_DS_*)已移除，传 region="cn" 会由工具返回明确的重定向提示。
 # ---------------------------------------------------------------------------
 LOKI_PLATFORMS = {
     "aws": {
@@ -88,12 +93,6 @@ LOKI_PLATFORMS = {
         "username": os.getenv("AWS_LOG_USERNAME", os.getenv("LOG_USERNAME", "")),
         "password": os.getenv("AWS_LOG_PASSWORD", os.getenv("LOG_PASSWORD", "")),
     },
-    "cn": {
-        "label": "国内公有云",
-        "url": os.getenv("LOKI_API_BASE_CN", "https://logs.going-link.net"),
-        "username": os.getenv("CN_LOG_USERNAME", os.getenv("LOG_USERNAME", "")),
-        "password": os.getenv("CN_LOG_PASSWORD", os.getenv("LOG_PASSWORD", "")),
-    },
 }
 # 各场景数据源(LogQL 中的 {ds="..."} 或 {source="..."});为空时回退到 query 直接指定
 LOKI_DATASOURCES = {
@@ -101,11 +100,6 @@ LOKI_DATASOURCES = {
         "prod": os.getenv("AWS_LOG_DS_PROD", "prod"),
         "nonprod": os.getenv("AWS_LOG_DS_NONPROD", "nonprod"),
         "ops": os.getenv("AWS_LOG_DS_OPS", "ops"),
-    },
-    "cn": {
-        "prod": os.getenv("CN_LOG_DS_PROD", ""),
-        "nonprod": os.getenv("CN_LOG_DS_NONPROD", ""),
-        "ops": os.getenv("CN_LOG_DS_OPS", ""),
     },
 }
 

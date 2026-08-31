@@ -1,8 +1,10 @@
 """Loki 日志客户端（复刻 pg-aws-log 的 GrafanaClient）。
 
-通过 Grafana proxy 查询 Loki 日志（LogQL）。支持双平台：
+通过 Grafana proxy 查询 Loki 日志（LogQL）。**仅 AWS 海外一个平台**：
   - aws：AWS 海外（jp-saas-1），URL 默认 logs.jp-saas-1.going-link.net
-  - cn ：国内公有云（logs.going-link.net），非 prod 已切换至此
+
+路由边界：国内公有云盘古日志（prod/dev/test，含此前的非生产 Loki 面板）已全部
+迁回阿里云 SLS，由 ``sls_config.py`` / ``obs_sls_query`` 承载；本模块不再处理 cn。
 
 认证流程（Grafana v11）：
   1. POST {base}/login  body: {"user","password"} -> Set-Cookie: grafana_session
@@ -72,7 +74,10 @@ class GrafanaClient:
     def __init__(self, platform: str):
         meta = LOKI_PLATFORMS.get(platform)
         if not meta:
-            raise LokiError(f"未知日志平台: {platform}（可选 aws/cn）")
+            raise LokiError(
+                f"未知日志平台: {platform}（Loki 仅支持 {', '.join(LOKI_PLATFORMS)}；"
+                "国内公有云盘古日志请用 obs_sls_query 查阿里云 SLS）"
+            )
         self.platform = platform
         self.base_url = meta["url"].rstrip("/")
         self.username = meta["username"]
@@ -127,7 +132,7 @@ class GrafanaClient:
             if not self.username or not self.password:
                 raise LokiError(
                     f"日志平台「{self.platform}」未配置账号密码，请在 .env 设置 "
-                    f"{'AWS' if self.platform == 'aws' else 'CN'}_LOG_USERNAME/PASSWORD"
+                    f"{self.platform.upper()}_LOG_USERNAME/PASSWORD"
                 )
             resp = self.session.post(
                 f"{self.base_url}/login",
@@ -261,6 +266,43 @@ def _parse_streams(resp: dict) -> list[dict]:
     return rows
 
 
+# 「不限定范围」的流选择器候选（按顺序尝试，首个不被 Loki 拒绝的生效）。
+# 背景：不同 Loki 版本对空选择器 `{}` 兼容性不一致（部分版本返回 HTTP 400），
+# 而 AWS 海外无默认 namespace 可推导，trace 查询必须走不限定范围的写法。
+# 可用 LOKI_ANY_SELECTOR 覆盖首选（如统一部署有固定标签时可填 '{app=~".+"}'）。
+_ANY_SELECTORS: tuple[str, ...] = (
+    (os.getenv("LOKI_ANY_SELECTOR", "").strip() or "{}"),
+    '{app=~".+"}',
+    '{job=~".+"}',
+)
+
+
+def _query_any_stream(
+    client: "GrafanaClient",
+    uid: str,
+    tid: str,
+    start: int,
+    end: int,
+    limit: int,
+    direction: str,
+) -> tuple[list[dict], str]:
+    """不限定 namespace 查 traceId：逐个尝试候选选择器，跳过被 Loki 拒绝(400)的写法。
+
+    仅 400（选择器语法被拒）才换下一个候选；401/403 已在 client 内部自动重登，
+    5xx/超时属于后端故障，直接向上抛出由调用方决定是否重试。
+    """
+    last_error: LokiError | None = None
+    for selector in _ANY_SELECTORS:
+        query = f'{selector} |= "{tid}"'
+        try:
+            return _parse_streams(client.loki_query_range(uid, query, start, end, limit, direction)), query
+        except LokiError as exc:
+            if exc.status != 400:
+                raise
+            last_error = exc
+    raise last_error or LokiError("不限定范围的 LogQL 选择器均被 Loki 拒绝")
+
+
 def query_trace(
     platform: str,
     env: str,
@@ -282,6 +324,7 @@ def query_trace(
     - 性能：不再单独发 ERROR/WARN 查询（full 结果里本就包含 ERROR/WARN 行，可在
       meta 里标注），一次 HTTP 拿全链路。仅在带 namespace 限定返回 0 时，才不限
       namespace 重查一次（适配 namespace 推导偏差/多租户混部）。即最多 2 次 HTTP。
+      若平台无默认 namespace（当前 aws 即如此），直接走不限 namespace 查询，不空跑一次。
     - 防 TOKEN 膨胀：`level` 支持 all/error/warn，只返回命中级别行；`clip_len`
       裁剪每条 line，避免完整 JSON 在结果里传输。
 
@@ -298,20 +341,25 @@ def query_trace(
     tid = trace_id
 
     ns = _ns_from_env(platform, env)
-    # 优先：带 namespace 限定（扫描范围小、快）
-    scoped_full = f'{{namespace="{ns}"}} |= "{tid}"'
+    # 优先：带 namespace 限定（扫描范围小、快）；平台无默认 ns 时跳过，不做无谓查询。
+    scoped_full = f'{{namespace="{ns}"}} |= "{tid}"' if ns else ""
     # 兜底：不限定 namespace。仅在带 ns 查询为 0 时降级一次（适配 namespace 推导
     # 偏差/多租户混部）。为防 traceId 为高频词时扫描全量流导致超时：
     #   - 兜底查询的 limit 收到 ns 限定的 1/5（最小 50），避免拉取过量；
     #   - 调用方通过 meta.unscoped_fallback 感知是否走了全量扫描。
-    unscoped_full = f'{{}} |= "{tid}"'
+    # 不限定范围的选择器按候选依次尝试（见 _query_any_stream），兼容拒绝 `{}` 的 Loki 版本。
+    unscoped_full = f"{_ANY_SELECTORS[0]} |= \"{tid}\""
 
-    full_rows = _parse_streams(client.loki_query_range(uid, scoped_full, start, end, limit, direction))
-    fallback = False
+    if scoped_full:
+        full_rows = _parse_streams(client.loki_query_range(uid, scoped_full, start, end, limit, direction))
+        used_full = scoped_full
+        fallback = False
+    else:
+        full_rows, used_full, fallback = [], unscoped_full, True
     if not full_rows:
         fallback = True
         unscoped_limit = max(50, int(limit / 5))
-        full_rows = _parse_streams(client.loki_query_range(uid, unscoped_full, start, end, unscoped_limit, direction))
+        full_rows, used_full = _query_any_stream(client, uid, tid, start, end, unscoped_limit, direction)
 
     merged = list({(r["ts_ns"], r["line"]): r for r in full_rows}.values())
     merged.sort(key=lambda r: r["ts_ns"], reverse=(direction == "BACKWARD"))
@@ -345,7 +393,6 @@ def query_trace(
     clip = max(200, min(int(clip_len), 5000))
     clipped = [{**r, "line": r["line"][:clip]} for r in out_rows]
 
-    used_full = unscoped_full if fallback else scoped_full
     meta = {
         "platform": platform,
         "env": env,
@@ -364,7 +411,8 @@ def query_trace(
         "total": len(out_rows),
         "truncated": raw_total >= limit,  # 拉满 limit 说明可能还有更多
         "hint": (
-            ("带 namespace 限定查询为 0，已自动降级为不限 namespace 重查并命中。" if fallback
+            ("本平台无默认 namespace，已按不限 namespace 查询。" if not ns
+             else "带 namespace 限定查询为 0，已自动降级为不限 namespace 重查并命中。" if fallback
              else "命中（按 namespace 限定）。")
             + (" 命中行数已达 limit，结果可能被截断；如需更多可调大 limit。" if raw_total >= limit else "")
             + (f" 当前只返回 {level_l.upper()} 级别日志；如需全量请用 level=all。" if level_l != "all" else "")
@@ -374,17 +422,16 @@ def query_trace(
 
 
 def _ns_from_env(platform: str, env: str) -> str:
-    """由平台+环境推导 Loki 的 namespace 标签值（与 obs_log_query 约定一致）。
+    """由平台+环境推导 Loki trace 查询的默认 namespace 标签值。
 
-    关键区别（手册是页面用法，MCP 是 API 用法）：
-    - 手册里「test 环境」在代码层面对应 env="nonprod" + namespace="saas-test-new"，
-      并不是 Loki 的 env 取值（LOKI_DATASOURCES 的 cn 只有 prod/nonprod/ops）。
-    - 故这里 env=nonprod -> saas-test-new；prod -> saas-prod；ops -> 空(不限定)。
-    - aws 的 namespace 与本仓盘古不同，env 直转（nonprod/prod/ops）由调用方决定。
-    仅作 trace 查询的默认 namespace；若实际 namespace 不同，用 obs_log_query 显式指定。
+    - 当前 Loki 只服务 AWS 海外：其 namespace 与国内盘古不同、无法由 env 推导，
+      返回空字符串（调用方会直接走不限 namespace 的查询）。
+    - 国内盘古（prod/dev/test）已迁回阿里云 SLS，namespace 由 ``sls_config``
+      按环境给出（saas-prod / saas-dev-new / saas-test-new），不走本函数。
+    - 若实际需要限定 namespace，请用 obs_log_query 在 LogQL 里显式写 {namespace="..."}。
     """
-    if platform == "cn":
-        return {"nonprod": "saas-test-new", "prod": "saas-prod"}.get(env, "")
+    if platform == "aws":
+        return ""
     return ""
 
 
@@ -408,6 +455,6 @@ def warn_unscoped(query: str) -> str | None:
     if not scoped:
         return (
             "query 未限定 namespace/service_name/pod 任一维度，将扫描全部数据流，"
-            "范围过大、查询慢且易超时。建议至少加一个标签过滤，如 {namespace=\"saas-test-new\"}"
+            "范围过大、查询慢且易超时。建议至少加一个标签过滤，如 {app=\"srm-gateway\"}"
         )
     return None

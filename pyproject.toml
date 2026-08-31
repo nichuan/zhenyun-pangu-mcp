@@ -1,7 +1,7 @@
 [project]
 name = "zhenyun-pangu-mcp"
 version = "0.1.0"
-description = "甄云盘古通用工具 MCP — 数据库(Archery)/猪齿鱼(Choerodon)/日志(Loki 双平台)/跨仓搜索"
+description = "甄云盘古通用工具 MCP — 数据库(Archery)/猪齿鱼(Choerodon)/日志(阿里云 SLS 国内盘古 + Loki AWS 海外)/跨仓搜索"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

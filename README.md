@@ -18,7 +18,7 @@
 >
 > **能力分类**（供 Agent 理解"何时用哪类工具"）：
 > - **认知层（知识/模板/表）**：`search_knowledge` / `get_knowledge` / `search_sql_templates` / `get_sql_template` / `search_tables` / `get_table` / `get_table_relations` / `search_pangu`（统一搜索）/ `diagnose_context`（组合诊断）
-> - **日志能力**：`obs_log_query` / `obs_log_trace` / `obs_log_datasources` / `obs_sls_query`
+> - **日志能力**：`obs_sls_query` / `obs_sls_targets`（国内公有云盘古 prod/dev/test，阿里云 SLS）/ `obs_log_query` / `obs_log_trace` / `obs_log_datasources`（AWS 海外，Loki）
 > - **数据能力**：`archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances`
 > - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，以只读查询为主，`choerodon_add_comment` 为需确认的写操作）
 > - **代码能力**：`gitlab_*`（GitLab 仓库：项目/代码/文件/目录/分支）+ `search_repo`（本地跨仓搜索）
@@ -37,7 +37,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 
 ## 能力总览
 
-工具按前缀/能力分组（共 45 个）：
+工具按前缀/能力分组（共 46 个）：
 
 | 前缀 | 工具 | 说明 |
 |------|------|------|
@@ -47,7 +47,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `search_pangu` | `search_pangu` | 统一搜索：一次检索 知识 + 模板 + 表 + 关系 |
 | `diagnose_context` | `diagnose_context` | 组合诊断：自动汇集 认知 → 模板 → 表 → 关系 的诊断上下文 |
 | 知识库维护写操作 | `save_knowledge` / `update_knowledge` / `delete_knowledge` / `save_sql_template` / `list_sql_templates` / `update_sql_template` / `delete_sql_template` / `record_template_usage` / `add_table_relation` / `record_table_usage` / `upsert_table_knowledge` | 沉淀、维护知识/模板/表目录/关联关系；仅写认知层元数据，不修改业务库 |
-| `obs_*` | `obs_log_query` / `obs_log_trace` / `obs_log_datasources` / `obs_sls_query` | 日志能力：Loki 双平台（aws 海外全环境 + cn 国内非生产）+ 阿里云 SLS（仅 cn 国内盘古 prod） |
+| `obs_*` | `obs_sls_query` / `obs_sls_targets` / `obs_log_query` / `obs_log_trace` / `obs_log_datasources` | 日志能力：阿里云 SLS（国内公有云盘古 prod + 非生产 dev/test 全覆盖）+ Loki（仅 AWS 海外全环境） |
 | `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` | 数据能力（Archery 双站点 cn/aws + 盘古专属租户/库/实例能力） |
 | `choerodon_*` | `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_add_comment` | 业务系统能力：猪齿鱼协作（内置 Python 客户端，纯 HTTP 登录；前 8 个为只读查询，`choerodon_add_comment` 为写操作，需确认） |
 | `gitlab_*` | `gitlab_search_projects` / `gitlab_search_code` / `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 代码能力：GitLab 仓库（项目 / 代码 / 文件 / 目录 / 分支） |
@@ -105,20 +105,27 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 
 ## 日志平台区分（重要）
 
-盘古日志分布在三个不同平台，查询前需先确认目标环境落在哪个平台：
+盘古日志分布在两个平台，查询前需先确认目标环境落在哪个平台：
 
 | 能力 | 环境 | 平台 | 数据源 / project | 标签体系 |
 |------|------|------|------------------|----------|
+| `obs_sls_query` | **cn 国内盘古 `prod`** | 阿里云 SLS | `pangu-cn-saas-3-prod-shared-sls-project-0` / `sls-store-0-pangu-prod` | `_namespace_` = `saas-prod` |
+| `obs_sls_query` | **cn 国内盘古 `dev` / `test`（非生产）** | 阿里云 SLS | `pangu-cn-saas-3-nonprod-shared-sls-project-0` / `sls-store-0-pangu-nonprod` | `_namespace_` = `saas-dev-new` / `saas-test-new` |
 | `obs_log_query` | AWS 海外（全部环境） | Grafana/Loki | `Jp-saas-1-prod` / `Jp-saas-1-noneprod` / `ops` | `job` / `app` |
-| `obs_log_query` | cn 国内非生产（dev/test） | Grafana/Loki | `Loki (pangu-noneprod)` 等 | `namespace` / `service_name` / `pod_name` / `container_name` |
-| `obs_sls_query` | **仅 cn 国内盘古 prod** | 阿里云 SLS | `pangu-cn-saas-3-prod-shared-sls-project-0` / `sls-store-0-pangu-prod` | `_namespace_` = `saas-prod` |
 
-- **cn 国内盘古 `prod` 日志 = 阿里云 SLS**，用 `obs_sls_query` 查询。
-- **cn 国内盘古 `dev`/`test` 等非生产**用 `obs_log_query(region="cn")`，盘古非生产面板（`namespace=saas-dev-new` / `saas-test-new`）日志在 `Loki (pangu-noneprod)` 数据源。
-- **AWS 海外（无论 prod/非生产）**全部用 `obs_log_query(region="aws")`。
-- ⚠️ 路由铁律：**除 cn 国内盘古 prod 走 SLS 外，其余（cn 非生产 + 全部 AWS）都走 Loki**。盘古非生产不要调 `obs_sls_query`。
+- **国内公有云（cn）盘古全部环境（`prod` / `dev` / `test`）都是阿里云 SLS**，一律用 `obs_sls_query(environment=...)`；`system`/`environment` 到 project/logstore/namespace 的映射由 MCP 完成，调用方不接触 AccessKey。
+- **AWS 海外（jp-saas-1，无论 prod/非生产）**用 `obs_log_query(region="aws")`。
+- ⚠️ 路由铁律：**国内盘古（含非生产）走 SLS，只有 AWS 海外走 Loki**。`obs_log_*` 已不接受 `region="cn"`（会返回「请改用 obs_sls_query」的提示）；盘古非生产不要调 `obs_log_query`。
+- 变迁记录：盘古非生产曾短暂迁移到 Loki（`logs.going-link.net`），现已迁回阿里云 SLS，相关 `LOKI_API_BASE_CN` / `CN_LOG_*` / `CN_LOG_DS_*` 配置已移除。
 
-> 三个平台的登录凭据、数据源名均在 `.env` 独立配置，详见 `.env.example`。
+**常用参数提示**：
+
+- `obs_sls_query(environment="prod"|"dev"|"test", trace_id=..., keyword=..., level="ERROR"|"" )`：`trace_id` 走「ERROR/WARN + 全链路」两阶段查询；`keyword` 传 SLS 查询子句（会与 `_namespace_` 过滤组合）。
+- 时间：`time_range` 支持 `最近30分钟` / `最近2小时` / `最近3天` / `今天` / `昨天` / `本周` / `上月`，或 `30m` / `2h` / `1d`，或 `YYYY-MM-DD HH:mm~HH:mm`（北京时间）。
+- `auto_expand`（默认 true）：未显式指定时间窗且 0 命中时，自动扩到最近 24h、72h 各重试一次，实际窗口见 `meta.attempted_windows`。
+- 不确定支持哪些环境时，用 `obs_sls_targets()` 列出真实映射；AWS 侧用 `obs_log_datasources(region="aws")` 列出真实数据源名。
+
+> 两个平台的凭据（SLS AccessKey / Grafana 账号密码）均在 `.env` 独立配置，详见 `.env.example`。
 
 ## 安装与运行
 
@@ -158,10 +165,11 @@ uv run python -m zhenyun_pangu_mcp
 |------|----------|------|
 | Archery | `ARCHERY_USERNAME` / `ARCHERY_PASSWORD` / `ARCHERY_AWS_USERNAME` / `ARCHERY_AWS_PASSWORD` | 数据库网关 cn/aws 凭据 |
 | | `ARCHERY_DB_CN` / `ARCHERY_DB_AWS` / `ARCHERY_DB_DEV` / `ARCHERY_DB_TEST` | 实例别名 → 真实实例名 |
-| Loki | `AWS_LOG_USERNAME` / `AWS_LOG_PASSWORD` / `CN_LOG_USERNAME` / `CN_LOG_PASSWORD` | Grafana 登录凭据 |
-| | `AWS_LOG_DS_*` / `CN_LOG_DS_*` | 环境 → 数据源名映射 |
+| Loki | `AWS_LOG_USERNAME` / `AWS_LOG_PASSWORD` | Grafana 登录凭据（仅 AWS 海外） |
+| | `AWS_LOG_DS_*` | 环境 → 数据源名映射（AWS 海外） |
 | Choerodon | `CHOERODON_BASE_URL` / `CHOERODON_USERNAME` / `CHOERODON_PASSWORD` | 猪齿鱼网关与登录凭据 |
-| SLS | `SLS_PANGU_PROD_ACCESS_KEY_ID` / `SLS_PANGU_PROD_ACCESS_KEY_SECRET` | 盘古正式环境阿里云日志凭据 |
+| SLS | `SLS_PANGU_PROD_ACCESS_KEY_ID` / `SLS_PANGU_PROD_ACCESS_KEY_SECRET` | 盘古 prod 阿里云日志凭据 |
+| | `SLS_PANGU_NONPROD_ACCESS_KEY_ID` / `SLS_PANGU_NONPROD_ACCESS_KEY_SECRET` | 盘古非生产（dev/test）阿里云日志凭据 |
 | GitLab | `GITLAB_BASE_URL` / `GITLAB_TOKEN`（或 `GITLAB_USERNAME`/`GITLAB_PASSWORD`） | GitLab 仓库地址与凭据 |
 | | `GITLAB_SEARCH_ROOT_ID` / `GITLAB_SEARCH_ROOT_GROUP` | 代码搜索根目录（限定 group/project，避免全站噪声） |
 | 其他 | `PG_ROOT` | 本地跨仓搜索根目录（默认本仓库根） |

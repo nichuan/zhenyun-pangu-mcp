@@ -38,18 +38,12 @@ def test_warn_unscoped_with_label_ok():
 # ---------------------------------------------------------------------------
 # _ns_from_env：平台+环境 -> namespace 标签值
 # ---------------------------------------------------------------------------
-def test_ns_from_env_cn():
-    # 注意：cn 的 env 取值是 LOKI_DATASOURCES 的 prod/nonprod/ops（非 dev/test/prod）
-    assert loki._ns_from_env("cn", "nonprod") == "saas-test-new"
-    assert loki._ns_from_env("cn", "prod") == "saas-prod"
-    # 手册「test 环境」= env=nonprod + namespace=saas-test-new；ops 不限定 ns
-    assert loki._ns_from_env("cn", "ops") == ""
-
-
 def test_ns_from_env_aws_passthrough():
-    # aws 与本仓盘古 namespace 不同，env 直转（由调用方决定）
+    # Loki 现仅服务 AWS 海外：其 namespace 无法由 env 推导（返回空 -> 不限定查询）。
+    # 国内盘古已迁回阿里云 SLS，namespace 由 sls_config 按环境给出（见 test_sls_routing.py）。
     assert loki._ns_from_env("aws", "nonprod") == ""
     assert loki._ns_from_env("aws", "prod") == ""
+    assert loki._ns_from_env("aws", "ops") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +99,7 @@ def test_query_trace_single_query_dedup_sort(monkeypatch):
         ]
 
     fake = _monkeypatch_client(monkeypatch, handler)
-    rows, meta = loki.query_trace("cn", "nonprod", "ABC", 0, 9_999_999_999, limit=50, direction="BACKWARD")
+    rows, meta = loki.query_trace("aws", "nonprod", "ABC", 0, 9_999_999_999, limit=50, direction="BACKWARD")
 
     # 只发 1 次 HTTP（单查询），去重后 3 条；BACKWARD 按时间倒序
     assert len(fake._queries) == 1
@@ -116,20 +110,23 @@ def test_query_trace_single_query_dedup_sort(monkeypatch):
     assert all("traceId=ABC" in r["line"] for r in rows)
 
 
-def test_query_trace_namespace_in_query(monkeypatch):
+def test_query_trace_no_namespace_filter_for_aws(monkeypatch):
+    # aws 无默认 namespace：只发 1 次不限定查询，不空跑带 ns 的那一次
     captured = []
     def handler(query):
         captured.append(query)
         return []
-    _monkeypatch_client(monkeypatch, handler)
-    loki.query_trace("cn", "nonprod", "XYZ", 0, 1, limit=10)
-    # 默认 namespace 应来自 _ns_from_env(cn,nonprod)=saas-test-new
-    assert captured and 'namespace="saas-test-new"' in captured[0]
-    assert any("XYZ" in q for q in captured)
+    fake = _monkeypatch_client(monkeypatch, handler)
+    loki.query_trace("aws", "nonprod", "XYZ", 0, 1, limit=10)
+    assert len(fake._queries) == 1
+    assert "namespace=" not in captured[0]
+    assert "XYZ" in captured[0]
 
 
 def test_query_trace_fallback_unscoped_when_empty(monkeypatch):
     # 带 ns 查询为 0 时，自动降级为不限 namespace 重查一次（共 2 次 HTTP）
+    # （用 monkeypatch 造出一个「有默认 ns」的平台，验证降级分支本身）
+    monkeypatch.setattr(loki, "_ns_from_env", lambda platform, env: "saas-test-new")
     calls = []
     def handler(query):
         calls.append(query)
@@ -137,7 +134,7 @@ def test_query_trace_fallback_unscoped_when_empty(monkeypatch):
             return []
         return [(1000, "traceId=EFG found-unscoped")]
     fake = _monkeypatch_client(monkeypatch, handler)
-    rows, meta = loki.query_trace("cn", "nonprod", "EFG", 0, 9_999_999_999, limit=50)
+    rows, meta = loki.query_trace("aws", "nonprod", "EFG", 0, 9_999_999_999, limit=50)
     assert len(calls) == 2  # 最多 2 次 HTTP
     assert meta["namespace_fallback"] is True
     assert len(rows) == 1
@@ -145,9 +142,48 @@ def test_query_trace_fallback_unscoped_when_empty(monkeypatch):
 
 
 def test_query_trace_resolve_error():
-    # 未知 env -> 抛 LokiError（不发起网络请求）
-    with pytest.raises(loki.LokiError):
-        loki.query_trace("cn", "no-such-env", "ABC", 0, 1)
+    # 未知环境 -> 抛 LokiError（不发起网络请求）。LOKI_DATASOURCES 现仅剩 aws 的键。
+    for env in ("no-such-env", "cn", ""):
+        with pytest.raises(loki.LokiError):
+            loki.query_trace("aws", env, "ABC", 0, 1)
+
+
+def test_query_any_stream_skips_rejected_selector(monkeypatch):
+    # Loki 拒绝 `{}`（400）时，自动换下一个候选选择器（如 {app=~".+"}），不整体失败
+    queries, rejections = [], {"n": 0}
+
+    class RejectingClient:
+        def resolve_uid(self, ds_name):
+            return "ds-uid"
+
+        def loki_query_range(self, uid, query, start, end, limit, direction):
+            queries.append(query)
+            if query.startswith("{}"):
+                rejections["n"] += 1
+                raise loki.LokiError("empty stream selector", status=400)
+            return {"status": "success", "data": {"result": [{"values": [(str(1000), "traceId=K found")]}]}}
+
+    monkeypatch.setattr(loki, "_get_client", lambda platform: RejectingClient())
+    rows, meta = loki.query_trace("aws", "nonprod", "K", 0, 9_999_999_999, limit=50)
+    assert rejections["n"] == 1  # `{}` 被拒一次
+    assert len(rows) == 1 and "found" in rows[0]["line"]
+    assert meta["unscoped_fallback"] is True
+    assert meta["full_query"].startswith('{app=~".+"}')  # 实际生效的选择器
+
+
+def test_query_any_stream_non400_raises(monkeypatch):
+    # 非 400（如 502 后端故障）不换选择器，直接上抛
+    class BrokenClient:
+        def resolve_uid(self, ds_name):
+            return "ds-uid"
+
+        def loki_query_range(self, uid, query, start, end, limit, direction):
+            raise loki.LokiError("bad gateway", status=502)
+
+    monkeypatch.setattr(loki, "_get_client", lambda platform: BrokenClient())
+    with pytest.raises(loki.LokiError) as exc:
+        loki.query_trace("aws", "nonprod", "K", 0, 1)
+    assert exc.value.status == 502
 
 
 def test_query_trace_level_filter(monkeypatch):
@@ -162,12 +198,12 @@ def test_query_trace_level_filter(monkeypatch):
         return lines
     fake = _monkeypatch_client(monkeypatch, handler)
 
-    rows_e, meta_e = loki.query_trace("cn", "nonprod", "tid", 0, 9_999_999_999, limit=50, level="error")
+    rows_e, meta_e = loki.query_trace("aws", "nonprod", "tid", 0, 9_999_999_999, limit=50, level="error")
     assert meta_e["total"] == 1
     assert meta_e["error_count"] == 1
     assert "boom" in rows_e[0]["line"]
 
-    rows_w, meta_w = loki.query_trace("cn", "nonprod", "tid", 0, 9_999_999_999, limit=50, level="warn")
+    rows_w, meta_w = loki.query_trace("aws", "nonprod", "tid", 0, 9_999_999_999, limit=50, level="warn")
     assert meta_w["total"] == 2  # WARN + ERROR
     assert meta_w["warn_count"] == 2
 
@@ -177,7 +213,7 @@ def test_query_trace_clip_len(monkeypatch):
     def handler(query):
         return [(1000, "x" * 5000)]
     _monkeypatch_client(monkeypatch, handler)
-    rows, meta = loki.query_trace("cn", "nonprod", "tid", 0, 1, limit=50, clip_len=300)
+    rows, meta = loki.query_trace("aws", "nonprod", "tid", 0, 1, limit=50, clip_len=300)
     assert len(rows[0]["line"]) == 300
     assert meta["clip_len"] == 300
 
@@ -187,7 +223,7 @@ def test_query_trace_truncated_flag(monkeypatch):
     def handler(query):
         return [(1000 + i, f"line {i}") for i in range(50)]
     _monkeypatch_client(monkeypatch, handler)
-    _, meta = loki.query_trace("cn", "nonprod", "tid", 0, 1, limit=50)
+    _, meta = loki.query_trace("aws", "nonprod", "tid", 0, 1, limit=50)
     assert meta["truncated"] is True
     assert meta["raw_total"] == 50
 
@@ -227,7 +263,7 @@ class _FakeSession:
 
 
 def _make_client(monkeypatch, login_resp, api_seq, username="u", password="p"):
-    c = loki.GrafanaClient("cn")
+    c = loki.GrafanaClient("aws")
     c.username = username
     c.password = password
     c.session = _FakeSession(login_resp, api_seq)
@@ -250,7 +286,7 @@ def test_login_persists_cookie_and_restores(monkeypatch):
     c.login()
     assert c.session.login_calls == 1
     assert c._cookie == "grafana_session=abc123"
-    assert store.get("cn", {}).get("cookie") == "grafana_session=abc123"
+    assert store.get("aws", {}).get("cookie") == "grafana_session=abc123"
 
     # 再次 login 不重新 POST（复用已缓存 cookie）
     c.login()
@@ -270,7 +306,7 @@ def test_login_relogin_when_cookie_expired(monkeypatch):
     monkeypatch.setattr(loki, "_save_cached_cookie", lambda d: store.update(d))
 
     # 过期 cookie：expiry 已过
-    store["cn"] = {"cookie": "grafana_session=old", "expiry": int(time.time()) - 100}
+    store["aws"] = {"cookie": "grafana_session=old", "expiry": int(time.time()) - 100}
     login_resp = _FakeResp(
         200,
         headers={"Set-Cookie": "grafana_session=new123; grafana_session_expiry=9999999999; Path=/"},
