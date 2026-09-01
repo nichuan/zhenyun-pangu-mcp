@@ -3,6 +3,7 @@
 工具按前缀分组：
   - obs_*       日志查询（阿里云 SLS：国内公有云盘古 prod/dev/test；Loki：仅 AWS 海外）
   - archery_*   数据库查询（Archery 双站点 cn/aws + 盘古专属租户/实例/库列表）
+  - es_*        正式环境 ES 只读查询（整合自 es-prod；铁律：严禁写、单次 ≤ ES_MAX_SIZE）
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
   - search_repo 跨仓代码搜索（内置纯标准库文件遍历，零外部依赖）
   - gitlab_*    GitLab 项目/代码/文件/目录/分支查询
@@ -21,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from mcp.server.fastmcp import FastMCP
 
-from . import archery, choerodon, loki, search, sls, sls_config, gitlab
+from . import archery, choerodon, es, loki, search, sls, sls_config, gitlab
 from .config import ARCHERY_INSTANCE_ALIASES, ARCHERY_DEFAULT_DB, LOKI_PLATFORMS
 from .knowledge_base import service as kb
 
@@ -86,6 +87,9 @@ _SOURCE_MAP = {
     "choerodon_download_attachment": "choerodon",
     "choerodon_list_comments": "choerodon",
     "choerodon_add_comment": "choerodon",
+    "es_search": "elasticsearch",
+    "es_count": "elasticsearch",
+    "es_get": "elasticsearch",
 }
 
 
@@ -1251,6 +1255,84 @@ def upsert_table_knowledge(
     不修改业务表。
     """
     return kb.upsert_table_knowledge(table_name, description, tags, db_name)
+
+
+# ============================================================================
+# es_* 正式环境 ES 只读查询（整合自 es-prod）
+# 铁律：严禁任何写操作；单次查询最多 ES_MAX_SIZE（默认 100）条。
+# 未配置 ES_BASE_URL 时返回 es_unconfigured，提示按 .env.example 补齐。
+# ============================================================================
+
+@mcp.tool()
+def es_search(index: str, dsl: str = "", size: int = 10, env: str = "prod") -> str:
+    """在正式环境 ES 指定索引上执行只读查询（_search）。
+
+    ⛔ 安全约束（任何场景强制，不可绕过）：
+      - 严禁删除/更新/写入 ES 数据，仅可查询。
+      - 每次最多返回 100 条（ES_MAX_SIZE，size 超出自动截断）。
+
+    参数:
+      index: 索引名，可单索引（swbh_todo）或通配（swbh_*），多索引逗号分隔
+      dsl:   查询 DSL JSON 字符串；留空 = match_all；支持 query/sort/aggs/from 等
+      size:  期望返回条数，默认 10，硬上限 ES_MAX_SIZE
+      env:   ES 环境 prod/dev/test（默认 prod）；未配置该环境链接时返回 es_unconfigured
+    """
+    try:
+        client = es.get_client(env)
+    except es.ESSafetyError as e:
+        return _err("es_unconfigured", str(e), retryable=False)
+    try:
+        info = client.search(index, dsl, size)
+    except es.ESSafetyError as e:
+        return _err("es_search", str(e), retryable=True)
+    return _ok({"index": index, "env": env, **info}, "elasticsearch")
+
+
+@mcp.tool()
+def es_count(index: str, dsl: str = "", env: str = "prod") -> str:
+    """统计正式环境 ES 指定索引的文档数（只读 _count，不受条数上限限制，仅返回数量）。
+
+    参数:
+      index: 索引名或通配（swbh_*）
+      dsl:   可选查询 DSL（JSON），留空 = 全部计数
+      env:   ES 环境 prod/dev/test（默认 prod）；未配置该环境链接时返回 es_unconfigured
+    """
+    try:
+        client = es.get_client(env)
+    except es.ESSafetyError as e:
+        return _err("es_unconfigured", str(e), retryable=False)
+    try:
+        info = client.count(index, dsl)
+    except es.ESSafetyError as e:
+        return _err("es_count", str(e), retryable=True)
+    if info.get("error"):
+        return _err("es_count", f"ES error: {info['error']}", retryable=False)
+    return _ok({"index": index, "env": env, "count": info.get("count")}, "elasticsearch")
+
+
+@mcp.tool()
+def es_get(index: str, doc_id: str, env: str = "prod") -> str:
+    """按 _id 读取正式环境 ES 单个文档（只读 _source 端点）。
+
+    参数:
+      index: 索引名
+      doc_id: 文档 _id
+      env:   ES 环境 prod/dev/test（默认 prod）；未配置该环境链接时返回 es_unconfigured
+    """
+    try:
+        client = es.get_client(env)
+    except es.ESSafetyError as e:
+        return _err("es_unconfigured", str(e), retryable=False)
+    try:
+        info = client.get(index, doc_id)
+    except es.ESSafetyError as e:
+        return _err("es_get", str(e), retryable=True)
+    if not info.get("found"):
+        return _ok({"found": False, "index": index, "env": env, "_id": doc_id}, "elasticsearch")
+    return _ok(
+        {"found": True, "index": index, "env": env, "_id": doc_id, "_source": info.get("_source")},
+        "elasticsearch",
+    )
 
 
 def main() -> None:
