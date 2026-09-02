@@ -198,6 +198,249 @@ AS $$
 $$;
 
 -- ============================================================================
+-- sql_templates：可复用 SQL 行动模板
+-- 说明：服务层已经依赖这些字段和 RPC；这里显式建表，避免新环境只有知识表而
+--       模板检索在运行时才失败。
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS sql_templates (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    title               TEXT NOT NULL,
+    template_no         TEXT,
+    category            TEXT NOT NULL DEFAULT 'query',
+    system              TEXT,
+    business_domain     TEXT,
+    scenario            TEXT NOT NULL DEFAULT '',
+    problem_description TEXT,
+    symptom             TEXT,
+    root_cause           TEXT,
+    sql_text            TEXT NOT NULL,
+    keywords            TEXT[] NOT NULL DEFAULT '{}',
+    core_tables         TEXT[] NOT NULL DEFAULT '{}',
+    parameters          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    execution_policy    TEXT,
+    risk_level          TEXT NOT NULL DEFAULT 'LOW',
+    status              TEXT NOT NULL DEFAULT 'draft',
+    source_type         TEXT NOT NULL DEFAULT 'manual',
+    verified            BOOLEAN NOT NULL DEFAULT FALSE,
+    verified_at         TIMESTAMPTZ,
+    verified_by         TEXT,
+    created_by          TEXT,
+    usage_count         INTEGER NOT NULL DEFAULT 0,
+    embedding           vector(2048),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sql_templates_title_trgm
+    ON sql_templates USING gin (title gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_sql_templates_scenario_trgm
+    ON sql_templates USING gin (scenario gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_sql_templates_keywords
+    ON sql_templates USING gin (keywords);
+CREATE INDEX IF NOT EXISTS idx_sql_templates_core_tables
+    ON sql_templates USING gin (core_tables);
+CREATE INDEX IF NOT EXISTS idx_sql_templates_category ON sql_templates (category);
+CREATE INDEX IF NOT EXISTS idx_sql_templates_system ON sql_templates (system);
+CREATE INDEX IF NOT EXISTS idx_sql_templates_domain ON sql_templates (business_domain);
+CREATE INDEX IF NOT EXISTS idx_sql_templates_status ON sql_templates (status);
+CREATE INDEX IF NOT EXISTS idx_sql_templates_verified ON sql_templates (verified);
+
+DROP TRIGGER IF EXISTS trg_sql_templates_updated_at ON sql_templates;
+CREATE TRIGGER trg_sql_templates_updated_at
+    BEFORE UPDATE ON sql_templates
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ============================================================================
+-- table_catalog：表级事实与自进化使用计数
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS table_catalog (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    db_name       TEXT NOT NULL DEFAULT 'srm',
+    table_name    TEXT NOT NULL,
+    table_comment TEXT,
+    description   TEXT,
+    domain        TEXT,
+    key_columns   JSONB NOT NULL DEFAULT '[]'::jsonb,
+    entry_columns JSONB NOT NULL DEFAULT '[]'::jsonb,
+    tags          TEXT[] NOT NULL DEFAULT '{}',
+    verified      BOOLEAN NOT NULL DEFAULT FALSE,
+    usage_count   INTEGER NOT NULL DEFAULT 0,
+    embedding     vector(2048),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (db_name, table_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_table_catalog_name_trgm
+    ON table_catalog USING gin (table_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_table_catalog_comment_trgm
+    ON table_catalog USING gin (table_comment gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_table_catalog_description_trgm
+    ON table_catalog USING gin (description gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_table_catalog_tags
+    ON table_catalog USING gin (tags);
+CREATE INDEX IF NOT EXISTS idx_table_catalog_domain ON table_catalog (domain);
+CREATE INDEX IF NOT EXISTS idx_table_catalog_db ON table_catalog (db_name);
+
+DROP TRIGGER IF EXISTS trg_table_catalog_updated_at ON table_catalog;
+CREATE TRIGGER trg_table_catalog_updated_at
+    BEFORE UPDATE ON table_catalog
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ============================================================================
+-- 模板 / 表目录检索与使用计数 RPC
+-- ============================================================================
+DROP FUNCTION IF EXISTS match_sql_templates(vector, float, int, text, text, text, boolean);
+CREATE OR REPLACE FUNCTION match_sql_templates(
+    query_embedding vector,
+    match_threshold float,
+    match_count int DEFAULT 10,
+    p_category text DEFAULT NULL,
+    p_system text DEFAULT NULL,
+    p_business_domain text DEFAULT NULL,
+    p_verified_only boolean DEFAULT FALSE
+)
+RETURNS TABLE (
+    id bigint, title text, template_no text, category text, system text,
+    business_domain text, scenario text, sql_text text, keywords text[],
+    core_tables text[], risk_level text, status text, source_type text,
+    verified boolean, verified_at timestamptz, usage_count integer, similarity float
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT t.id, t.title, t.template_no, t.category, t.system,
+           t.business_domain, t.scenario, t.sql_text, t.keywords,
+           t.core_tables, t.risk_level, t.status, t.source_type,
+           t.verified, t.verified_at, t.usage_count,
+           (1 - (t.embedding <=> query_embedding))::float AS similarity
+    FROM sql_templates t
+    WHERE t.embedding IS NOT NULL
+      AND (p_category IS NULL OR t.category = p_category)
+      AND (p_system IS NULL OR t.system = p_system)
+      AND (p_business_domain IS NULL OR t.business_domain = p_business_domain)
+      AND (NOT p_verified_only OR t.verified)
+      AND (1 - (t.embedding <=> query_embedding)) > match_threshold
+    ORDER BY t.embedding <=> query_embedding
+    LIMIT match_count;
+$$;
+
+DROP FUNCTION IF EXISTS search_sql_templates_keyword(text, int, text, text, text, boolean);
+CREATE OR REPLACE FUNCTION search_sql_templates_keyword(
+    keyword text,
+    match_count int DEFAULT 10,
+    p_category text DEFAULT NULL,
+    p_system text DEFAULT NULL,
+    p_business_domain text DEFAULT NULL,
+    p_verified_only boolean DEFAULT FALSE
+)
+RETURNS TABLE (
+    id bigint, title text, template_no text, category text, system text,
+    business_domain text, scenario text, sql_text text, keywords text[],
+    core_tables text[], risk_level text, status text, source_type text,
+    verified boolean, verified_at timestamptz, usage_count integer, rank float
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT t.id, t.title, t.template_no, t.category, t.system,
+           t.business_domain, t.scenario, t.sql_text, t.keywords,
+           t.core_tables, t.risk_level, t.status, t.source_type,
+           t.verified, t.verified_at, t.usage_count,
+           (CASE WHEN t.title ILIKE '%' || keyword || '%' THEN 4.0 ELSE 0 END
+            + CASE WHEN t.scenario ILIKE '%' || keyword || '%' THEN 3.0 ELSE 0 END
+            + CASE WHEN array_to_string(t.keywords, ' ') ILIKE '%' || keyword || '%' THEN 2.0 ELSE 0 END
+            + CASE WHEN array_to_string(t.core_tables, ' ') ILIKE '%' || keyword || '%' THEN 1.0 ELSE 0 END)::float AS rank
+    FROM sql_templates t
+    WHERE (t.title ILIKE '%' || keyword || '%'
+        OR t.scenario ILIKE '%' || keyword || '%'
+        OR array_to_string(t.keywords, ' ') ILIKE '%' || keyword || '%'
+        OR array_to_string(t.core_tables, ' ') ILIKE '%' || keyword || '%')
+      AND (p_category IS NULL OR t.category = p_category)
+      AND (p_system IS NULL OR t.system = p_system)
+      AND (p_business_domain IS NULL OR t.business_domain = p_business_domain)
+      AND (NOT p_verified_only OR t.verified)
+      AND t.status <> 'deprecated'
+    ORDER BY rank DESC, t.updated_at DESC
+    LIMIT match_count;
+$$;
+
+DROP FUNCTION IF EXISTS search_table_catalog_keyword(text, int, text, text);
+CREATE OR REPLACE FUNCTION search_table_catalog_keyword(
+    keyword text,
+    match_count int DEFAULT 5,
+    filter_domain text DEFAULT NULL,
+    filter_db text DEFAULT NULL
+)
+RETURNS TABLE (
+    id bigint, db_name text, table_name text, table_comment text,
+    description text, domain text, key_columns jsonb, entry_columns jsonb,
+    tags text[], verified boolean, usage_count integer, rank float
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT t.id, t.db_name, t.table_name, t.table_comment, t.description,
+           t.domain, t.key_columns, t.entry_columns, t.tags, t.verified,
+           t.usage_count,
+           (CASE WHEN t.table_name ILIKE '%' || keyword || '%' THEN 4.0 ELSE 0 END
+            + CASE WHEN COALESCE(t.table_comment, '') ILIKE '%' || keyword || '%' THEN 3.0 ELSE 0 END
+            + CASE WHEN COALESCE(t.description, '') ILIKE '%' || keyword || '%' THEN 2.0 ELSE 0 END
+            + CASE WHEN array_to_string(t.tags, ' ') ILIKE '%' || keyword || '%' THEN 1.0 ELSE 0 END)::float AS rank
+    FROM table_catalog t
+    WHERE (t.table_name ILIKE '%' || keyword || '%'
+        OR COALESCE(t.table_comment, '') ILIKE '%' || keyword || '%'
+        OR COALESCE(t.description, '') ILIKE '%' || keyword || '%'
+        OR array_to_string(t.tags, ' ') ILIKE '%' || keyword || '%')
+      AND (filter_domain IS NULL OR t.domain = filter_domain)
+      AND (filter_db IS NULL OR t.db_name = filter_db)
+    ORDER BY rank DESC, t.usage_count DESC, t.table_name
+    LIMIT match_count;
+$$;
+
+DROP FUNCTION IF EXISTS search_table_catalog(vector, int, text, text);
+CREATE OR REPLACE FUNCTION search_table_catalog(
+    query_embedding vector,
+    match_count int DEFAULT 5,
+    filter_domain text DEFAULT NULL,
+    filter_db text DEFAULT NULL
+)
+RETURNS TABLE (
+    id bigint, db_name text, table_name text, table_comment text,
+    description text, domain text, key_columns jsonb, entry_columns jsonb,
+    tags text[], verified boolean, usage_count integer, similarity float
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT t.id, t.db_name, t.table_name, t.table_comment, t.description,
+           t.domain, t.key_columns, t.entry_columns, t.tags, t.verified,
+           t.usage_count, (1 - (t.embedding <=> query_embedding))::float AS similarity
+    FROM table_catalog t
+    WHERE t.embedding IS NOT NULL
+      AND (filter_domain IS NULL OR t.domain = filter_domain)
+      AND (filter_db IS NULL OR t.db_name = filter_db)
+    ORDER BY t.embedding <=> query_embedding
+    LIMIT match_count;
+$$;
+
+DROP FUNCTION IF EXISTS increment_template_usage(bigint);
+CREATE OR REPLACE FUNCTION increment_template_usage(p_template_id bigint)
+RETURNS void
+LANGUAGE sql VOLATILE
+AS $$
+    UPDATE sql_templates
+       SET usage_count = usage_count + 1
+     WHERE id = p_template_id;
+$$;
+
+DROP FUNCTION IF EXISTS increment_table_usage(text);
+CREATE OR REPLACE FUNCTION increment_table_usage(p_table_name text)
+RETURNS void
+LANGUAGE sql VOLATILE
+AS $$
+    UPDATE table_catalog
+       SET usage_count = usage_count + 1
+     WHERE table_name = p_table_name;
+$$;
+
+-- ============================================================================
 -- table_relations：表与表之间的关联关系（JOIN 候选；机器事实，供 SQL Agent 复用）
 -- 设计要点（P0-3 可信度增强）：
 --   confidence 0~1：对 join 正确性的置信度
@@ -244,3 +487,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service_r
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
 GRANT EXECUTE ON FUNCTION match_knowledge_docs(vector, float, int, text, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION search_knowledge_docs_keyword(text, int, text, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION match_sql_templates(vector, float, int, text, text, text, boolean) TO service_role;
+GRANT EXECUTE ON FUNCTION search_sql_templates_keyword(text, int, text, text, text, boolean) TO service_role;
+GRANT EXECUTE ON FUNCTION search_table_catalog_keyword(text, int, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION search_table_catalog(vector, int, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION increment_template_usage(bigint) TO service_role;
+GRANT EXECUTE ON FUNCTION increment_table_usage(text) TO service_role;

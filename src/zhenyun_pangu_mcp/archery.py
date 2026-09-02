@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 
 import requests
 from requests.exceptions import RequestException
@@ -25,6 +26,12 @@ from .config import (
 
 class ArcheryError(Exception):
     """Archery 查询/认证错误。"""
+
+
+# 同一 MCP 进程内按站点复用登录态，避免每次工具调用都重新登录。
+# Session 还包含 cookie jar，因此必须和站点绑定，不能在 cn/aws 之间混用。
+_CLIENTS: dict[str, "ArcheryClient"] = {}
+_CLIENTS_LOCK = threading.Lock()
 
 
 # Archery 用户查询只支持最基本的单条只读语句：SELECT、EXPLAIN SELECT、
@@ -153,44 +160,88 @@ class ArcheryClient:
         self.session = requests.Session()
         self.domain = urlparse(self.base_url).netloc.split(":")[0]
         self._authenticated = False
+        # requests.Session 不保证并发读写安全；同一个缓存 client 的请求串行化，
+        # 同时使用 RLock 允许请求辅助方法嵌套调用 authenticate/_ensure_csrf。
+        self._request_lock = threading.RLock()
 
     # ---------- 认证 ----------
     def authenticate(self) -> None:
-        if self._authenticated:
-            return
-        if not self.username or not self.password:
-            raise ArcheryError(
-                f"站点「{self.site}」未配置账号密码，请在 .env 设置 "
-                f"{'ARCHERY_' if self.site == 'cn' else 'ARCHERY_AWS_'}USERNAME/PASSWORD"
-            )
-        login_url = urljoin(self.base_url + "/", "login/")
-        auth_url = urljoin(self.base_url + "/", "authenticate/")
+        with self._request_lock:
+            if self._authenticated:
+                return
+            if not self.username or not self.password:
+                raise ArcheryError(
+                    f"站点「{self.site}」未配置账号密码，请在 .env 设置 "
+                    f"{'ARCHERY_' if self.site == 'cn' else 'ARCHERY_AWS_'}USERNAME/PASSWORD"
+                )
+            login_url = urljoin(self.base_url + "/", "login/")
+            auth_url = urljoin(self.base_url + "/", "authenticate/")
 
-        # 1) GET 登录页拿 csrftoken
-        try:
-            self.session.get(login_url, timeout=self.timeout)
-        except RequestException as e:
-            raise ArcheryError(f"无法访问登录页: {e}") from e
-        csrf = self.session.cookies.get("csrftoken")
-        if not csrf:
-            raise ArcheryError("未从登录页获取到 csrftoken，请检查登录地址")
+            # 1) GET 登录页拿 csrftoken
+            try:
+                self.session.get(login_url, timeout=self.timeout)
+            except RequestException as e:
+                raise ArcheryError(f"无法访问登录页: {e}") from e
+            csrf = self.session.cookies.get("csrftoken")
+            if not csrf:
+                raise ArcheryError("未从登录页获取到 csrftoken，请检查登录地址")
 
-        # 2) POST /authenticate/
-        headers = {
-            "X-CSRFToken": csrf,
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": login_url,
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        }
-        data = {"username": self.username, "password": self.password}
-        try:
-            resp = self.session.post(auth_url, data=data, headers=headers, timeout=self.timeout)
-        except RequestException as e:
-            raise ArcheryError(f"登录请求失败: {e}") from e
-        if not self.session.cookies.get("sessionid"):
-            detail = (resp.text or "")[:200]
-            raise ArcheryError(f"登录失败（未获取到 sessionid）: {detail}")
-        self._authenticated = True
+            # 2) POST /authenticate/
+            headers = {
+                "X-CSRFToken": csrf,
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": login_url,
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            }
+            data = {"username": self.username, "password": self.password}
+            try:
+                resp = self.session.post(auth_url, data=data, headers=headers, timeout=self.timeout)
+            except RequestException as e:
+                raise ArcheryError(f"登录请求失败: {e}") from e
+            if not self.session.cookies.get("sessionid"):
+                detail = (resp.text or "")[:200]
+                raise ArcheryError(f"登录失败（未获取到 sessionid）: {detail}")
+            self._authenticated = True
+
+    def _invalidate_auth(self) -> None:
+        """清除失效认证，使下一次请求重新获取 CSRF/session cookie。"""
+        self._authenticated = False
+        self.session.cookies.clear()
+
+    def _request_with_reauth(
+        self,
+        method: str,
+        url: str,
+        *,
+        data: dict | None = None,
+        params: dict | None = None,
+        headers: dict | None = None,
+        csrf: bool = False,
+    ):
+        """发送 Archery API 请求，401/403/登录重定向时重新认证并重试一次。"""
+        with self._request_lock:
+            for attempt in range(2):
+                self.authenticate()
+                request_headers = dict(headers or {})
+                if csrf:
+                    request_headers["X-CSRFToken"] = self._ensure_csrf() or ""
+                try:
+                    response = self.session.request(
+                        method,
+                        url,
+                        data=data,
+                        params=params,
+                        headers=request_headers,
+                        timeout=self.timeout,
+                        allow_redirects=False,
+                    )
+                except RequestException as e:
+                    raise ArcheryError(f"请求失败: {e}") from e
+                if attempt == 0 and response.status_code in (301, 302, 401, 403):
+                    self._invalidate_auth()
+                    continue
+                return response
+        raise ArcheryError("请求失败：认证重试次数已耗尽")
 
     def _ensure_csrf(self) -> str | None:
         if not self.session.cookies.get("csrftoken"):
@@ -201,10 +252,13 @@ class ArcheryClient:
         return self.session.cookies.get("csrftoken")
 
     def _parse(self, resp) -> dict:
+        if resp.status_code in (301, 302, 401, 403):
+            self._authenticated = False
+            raise ArcheryError("认证失效，请重新登录")
         try:
             payload = resp.json()
         except ValueError:
-            if resp.status_code in (302, 403) or "login" in resp.text.lower():
+            if "login" in resp.text.lower():
                 self._authenticated = False
                 raise ArcheryError("认证失效，请重新登录")
             raise ArcheryError(f"返回非 JSON（HTTP {resp.status_code}），请检查实例/库名")
@@ -226,7 +280,6 @@ class ArcheryClient:
         # archery_query 永远使用默认 False，不能通过 SQL 文本绕过此边界。
         if not _internal_allow_non_select:
             validate_select_sql(sql)
-        self.authenticate()
         url = urljoin(self.base_url + "/", "query/")
         data = {
             "instance_name": instance_name,
@@ -236,17 +289,12 @@ class ArcheryClient:
             "sql_content": sql,
             "limit_num": limit_num,
         }
-        csrf = self._ensure_csrf()
         headers = {
-            "X-CSRFToken": csrf or "",
             "X-Requested-With": "XMLHttpRequest",
             "Referer": urljoin(self.base_url + "/", "sqlquery/"),
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         }
-        try:
-            resp = self.session.post(url, data=data, headers=headers, timeout=self.timeout)
-        except RequestException as e:
-            raise ArcheryError(f"查询请求失败: {e}") from e
+        resp = self._request_with_reauth("POST", url, data=data, headers=headers, csrf=True)
         payload = self._parse(resp)
         block = payload.get("data", {})
         if isinstance(block, str):
@@ -270,7 +318,6 @@ class ArcheryClient:
 
     # ---------- 表结构 ----------
     def describe_table(self, instance_name: str, db_name: str, tb_name: str) -> dict:
-        self.authenticate()
         url = urljoin(self.base_url + "/", "instance/describetable/")
         data = {
             "instance_name": instance_name,
@@ -278,17 +325,12 @@ class ArcheryClient:
             "schema_name": "",
             "tb_name": tb_name,
         }
-        csrf = self._ensure_csrf()
         headers = {
-            "X-CSRFToken": csrf or "",
             "X-Requested-With": "XMLHttpRequest",
             "Referer": urljoin(self.base_url + "/", "sqlquery/"),
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         }
-        try:
-            resp = self.session.post(url, data=data, headers=headers, timeout=self.timeout)
-        except RequestException as e:
-            raise ArcheryError(f"获取表结构失败: {e}") from e
+        resp = self._request_with_reauth("POST", url, data=data, headers=headers, csrf=True)
         payload = self._parse(resp)
         block = payload.get("data", {})
         if isinstance(block, str):
@@ -302,7 +344,6 @@ class ArcheryClient:
         return {"table": table, "create_table": create_table}
 
     def list_columns(self, instance_name: str, db_name: str, tb_name: str) -> list[str]:
-        self.authenticate()
         url = urljoin(self.base_url + "/", "instance/instance_resource/")
         params = {
             "instance_name": instance_name,
@@ -311,15 +352,11 @@ class ArcheryClient:
             "tb_name": tb_name,
             "resource_type": "column",
         }
-        self._ensure_csrf()
         headers = {
             "X-Requested-With": "XMLHttpRequest",
             "Referer": urljoin(self.base_url + "/", "sqlquery/"),
         }
-        try:
-            resp = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
-        except RequestException as e:
-            raise ArcheryError(f"获取字段列表失败: {e}") from e
+        resp = self._request_with_reauth("GET", url, params=params, headers=headers, csrf=True)
         payload = self._parse(resp)
         block = payload.get("data", [])
         if isinstance(block, str):
@@ -357,7 +394,12 @@ def resolve_instance(name: str | None, site: str, default: str) -> str:
 
 
 def _client(site: str) -> ArcheryClient:
-    return ArcheryClient(site)
+    with _CLIENTS_LOCK:
+        client = _CLIENTS.get(site)
+        if client is None:
+            client = ArcheryClient(site)
+            _CLIENTS[site] = client
+        return client
 
 
 # ============================================================================

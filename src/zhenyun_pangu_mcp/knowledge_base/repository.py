@@ -135,6 +135,48 @@ def search_templates_keyword(
     keyword: str | None = None, category: str | None = None, system: str | None = None,
     business_domain: str | None = None, verified_only: bool = False, limit: int = 10,
 ) -> list[dict[str, Any]]:
+    if keyword and keyword.strip():
+        kw = keyword.strip()
+        try:
+            return sb.rpc("search_sql_templates_keyword", {
+                "keyword": kw,
+                "match_count": limit,
+                "p_category": category,
+                "p_system": system,
+                "p_business_domain": business_domain,
+                "p_verified_only": verified_only,
+            })
+        except Exception as e:  # noqa: BLE001 - 兼容尚未执行新版 schema 的旧库
+            logger.warning("模板关键词 RPC 不可用，降级到 REST 过滤：%s", e)
+            # 旧库没有 RPC 时至少扩大候选窗口；此前只取 limit 行再过滤会漏掉
+            # 排在前面的不匹配记录之后的所有命中项。
+            eq: dict[str, Any] = {}
+            if category:
+                eq["category"] = category
+            if system:
+                eq["system"] = system
+            if business_domain:
+                eq["business_domain"] = business_domain
+            if verified_only:
+                eq["verified"] = True
+            try:
+                fetch_limit = min(max(limit * 20, 100), 500)
+                rows = sb.query_table(
+                    sb.config.SQL_TEMPLATE_TABLE, select="*", eq=eq,
+                    order="updated_at.desc", limit=fetch_limit,
+                )
+                needle = kw.lower()
+                filtered = [
+                    r for r in rows
+                    if needle in (r.get("scenario") or "").lower()
+                    or needle in (r.get("title") or "").lower()
+                    or needle in " ".join(r.get("keywords") or []).lower()
+                    or needle in " ".join(r.get("core_tables") or []).lower()
+                ]
+                return filtered[:limit]
+            except Exception as fallback_error:  # noqa: BLE001
+                logger.warning("模板关键词 REST 降级也失败：%s", fallback_error)
+                return []
     eq: dict[str, Any] = {}
     if category:
         eq["category"] = category
@@ -144,24 +186,6 @@ def search_templates_keyword(
         eq["business_domain"] = business_domain
     if verified_only:
         eq["verified"] = True
-    params: dict[str, Any] = {"select": "*", "limit": limit}
-    for k, v in eq.items():
-        params[k] = f"eq.{v}"
-    if keyword and keyword.strip():
-        kw = keyword.strip()
-        # 关键词命中任一字段；用 or 语义需逐字段 or。这里用 ilike 覆盖 scenario/keywords/title
-        try:
-            rows = sb.query_table(sb.config.SQL_TEMPLATE_TABLE, select="*", eq=eq, limit=limit)
-            filtered = [
-                r for r in rows
-                if kw.lower() in (r.get("scenario") or "").lower()
-                or kw.lower() in (r.get("title") or "").lower()
-                or kw.lower() in " ".join(r.get("keywords") or []).lower()
-                or kw.lower() in " ".join(r.get("core_tables") or []).lower()
-            ]
-            return filtered[:limit]
-        except Exception:  # noqa: BLE001
-            return []
     return sb.query_table(sb.config.SQL_TEMPLATE_TABLE, select="*", eq=eq, limit=limit)
 
 
@@ -204,8 +228,10 @@ def list_templates(
 
 def increment_template_usage(template_id: int) -> None:
     """模板被复用后累加 usage_count。"""
-    url = f"{sb.base_url()}/rest/v1/{sb.config.SQL_TEMPLATE_TABLE}?id=eq.{template_id}"
-    sb._rest_request("PATCH", url, body={"usage_count": 1}, params={"usage_count": "increment"})
+    # PostgREST 的 query 参数不是表达式求值；PATCH usage_count=1 会把计数
+    # 重置为 1。通过数据库 RPC 在服务端执行 usage_count = usage_count + 1，
+    # 同时避免并发调用下的丢失更新。
+    sb.rpc("increment_template_usage", {"p_template_id": int(template_id)})
 
 
 # =========================================================================== #
@@ -234,14 +260,21 @@ VALID_RELATION_SOURCES = (
     "inferred",         # 自动推断（未实测，需谨慎）
 )
 
+_COLUMN_EXISTS_CACHE: dict[tuple[str, str], bool] = {}
+
 
 def _has_column(table: str, column: str) -> bool:
     """探测指定表是否含某列（避免写入不存在的列导致 REST 400）。"""
+    cache_key = (table, column)
+    if cache_key in _COLUMN_EXISTS_CACHE:
+        return _COLUMN_EXISTS_CACHE[cache_key]
     try:
         rows = sb.query_table(table, select=column, limit=1)
-        return True
+        exists = True
     except Exception:  # noqa: BLE001
-        return False
+        exists = False
+    _COLUMN_EXISTS_CACHE[cache_key] = exists
+    return exists
 
 
 def add_table_relation(
@@ -323,6 +356,7 @@ def search_tables_semantic(
 # =========================================================================== #
 def get_relations(table_name: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
     base_select = "from_table,to_table,join_on,relation_type,description,confidence,from_db,to_db,verified"
     # 兼容：source 列存在才 select，避免旧表上 REST 400
     if _has_column(sb.config.TABLE_RELATION_TABLE, "source"):
@@ -334,7 +368,11 @@ def get_relations(table_name: str) -> list[dict[str, Any]]:
                 select=base_select,
                 eq={col: table_name}, limit=100,
             )
-            out.extend(rows or [])
+            for row in rows or []:
+                key = (row.get("from_table"), row.get("to_table"), row.get("join_on"))
+                if key not in seen:
+                    seen.add(key)
+                    out.append(row)
         except Exception as e:  # noqa: BLE001
             logger.warning("查询关系失败(%s)：%s", col, e)
     return out

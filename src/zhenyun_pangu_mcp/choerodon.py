@@ -23,6 +23,7 @@ import base64
 import json
 import os
 import re
+import tempfile
 import time
 from typing import Any, Optional
 
@@ -62,6 +63,12 @@ TOKEN_TTL = 8 * 3600
 
 def _load_cached_token() -> Optional[str]:
     try:
+        if os.path.exists(TOKEN_CACHE):
+            # 兼容旧版本缓存，避免已有 token 文件继续保持宽权限。
+            try:
+                os.chmod(TOKEN_CACHE, 0o600)
+            except OSError:
+                pass
         with open(TOKEN_CACHE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if time.time() < data.get("expires_at", 0):
@@ -72,12 +79,24 @@ def _load_cached_token() -> Optional[str]:
 
 
 def _save_token(token: str, ttl: int = TOKEN_TTL):
+    temp_name: str | None = None
     try:
         os.makedirs(os.path.dirname(TOKEN_CACHE) or ".", exist_ok=True)
-        with open(TOKEN_CACHE, "w", encoding="utf-8") as f:
+        cache_dir = os.path.dirname(os.path.abspath(TOKEN_CACHE))
+        fd, temp_name = tempfile.mkstemp(prefix=".choerodon-token.", dir=cache_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.chmod(temp_name, 0o600)
             json.dump({"access_token": token, "expires_at": time.time() + ttl}, f)
-    except Exception:
-        pass
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_name, TOKEN_CACHE)
+        os.chmod(TOKEN_CACHE, 0o600)
+    except OSError:
+        if temp_name:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
 
 
 def _clear_token_cache():
@@ -200,12 +219,16 @@ def _request(method: str, path: str, *, params: Optional[dict] = None,
              timeout: int = 30) -> Any:
     """统一请求,401 自动刷新 token 重试一次。"""
     def do(token):
-        return requests.request(
-            method, f"{BASE_URL}{path}",
-            params=params, json=json_body, data=data,
-            headers=_headers(token, content_type=(json_body is not None)),
-            timeout=timeout, allow_redirects=False,
-        )
+        try:
+            return requests.request(
+                method, f"{BASE_URL}{path}",
+                params=params, json=json_body, data=data,
+                headers=_headers(token, content_type=(json_body is not None)),
+                timeout=timeout, allow_redirects=False,
+            )
+        except requests.RequestException as e:
+            # 统一转成 ChoerodonError，让上层按可重试的外部依赖错误处理。
+            raise ChoerodonError(f"API 请求网络错误 {method} {path}: {e}") from e
     resp = do(get_access_token())
     if resp.status_code == 401:
         _clear_token_cache()

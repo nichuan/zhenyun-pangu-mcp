@@ -131,8 +131,15 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 
 ```bash
 cd zhenyun-pangu-mcp
-uv sync  # 或 pip install -e .
+uv sync
 cp .env.example .env   # 填写真实凭据
+```
+
+运行测试（统一通过 uv 管理解释器和依赖）：
+
+```bash
+uv sync --dev
+uv run pytest -q
 ```
 
 以 stdio 运行：

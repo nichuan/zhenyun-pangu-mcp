@@ -27,6 +27,7 @@ from .knowledge_base import service as kb
 
 mcp = FastMCP("zhenyun-pangu-mcp")
 BJ = timezone(timedelta(hours=8))
+MAX_LOG_QUERY_SPAN = 31 * 24 * 3600
 
 
 def _json(value: object) -> str:
@@ -171,10 +172,30 @@ def _time_bounds(from_time: int | None, to_time: int | None, time_range: str) ->
     # 绝对时间 "YYYY-MM-DD HH:mm~HH:mm"（保留空格，避免 strptime 解析失败）
     if "~" in raw:
         parts = raw.split("~")
+        if len(parts) != 2:
+            raise ValueError('绝对时间格式错误，应为 "YYYY-MM-DD HH:mm~HH:mm"')
         start = int(datetime.strptime(parts[0].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=BJ).timestamp())
         end = int(datetime.strptime(parts[1].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=BJ).timestamp())
         return start, end
     return now - 7200, now
+
+
+def _validate_time_bounds(start: int, end: int) -> tuple[int, int]:
+    """拒绝反向/空时间窗和过宽查询，避免日志 API 被无意打爆。"""
+    if end <= start:
+        raise ValueError("时间范围无效：to_time 必须晚于 from_time")
+    span = end - start
+    if span > MAX_LOG_QUERY_SPAN:
+        raise ValueError("时间范围过大：单次日志查询最多支持 31 天")
+    return int(start), int(end)
+
+
+def _bounded_limit(value: int, maximum: int) -> int:
+    """把工具入参限制在服务端允许范围内，并把非法值转成明确的参数错误。"""
+    try:
+        return max(1, min(int(value), maximum))
+    except (TypeError, ValueError) as e:
+        raise ValueError("limit 必须是整数") from e
 
 
 def _timeout_hint(start: int, end: int) -> str:
@@ -250,8 +271,11 @@ def obs_log_query(
 
     warning = loki.warn_unscoped(query)
 
-    start, end = _time_bounds(from_time, to_time, time_range)
-    limit = max(1, min(int(limit), 5000))
+    try:
+        start, end = _validate_time_bounds(*_time_bounds(from_time, to_time, time_range))
+        limit = _bounded_limit(limit, 5000)
+    except ValueError as e:
+        return _err("bad_param", str(e), retryable=False)
     try:
         resp = client.loki_query_range(uid, query, start, end, limit, direction)
     except loki.LokiError as e:
@@ -324,8 +348,11 @@ def obs_log_trace(
     except loki.LokiError as e:
         return _err("config", str(e), retryable=False)
 
-    start, end = _time_bounds(from_time, to_time, time_range)
-    limit = max(1, min(int(limit), 5000))
+    try:
+        start, end = _validate_time_bounds(*_time_bounds(from_time, to_time, time_range))
+        limit = _bounded_limit(limit, 5000)
+    except ValueError as e:
+        return _err("bad_param", str(e), retryable=False)
     try:
         rows, meta = loki.query_trace(
             region, env, trace_id, start, end, limit, direction,
@@ -813,8 +840,10 @@ def obs_sls_query(
     try:
         target = sls_config.resolve_target(system, environment)
         ak_id, ak_secret = sls_config.credentials(target)
-        limit = max(1, min(int(limit), 500))
-        start, end = _time_bounds(from_time or None, to_time or None, time_range)
+        limit = _bounded_limit(limit, 500)
+        start, end = _validate_time_bounds(
+            *_time_bounds(from_time or None, to_time or None, time_range)
+        )
 
         normalized_range = (time_range or "").strip().lower().replace(" ", "")
         explicit_window = bool(from_time or to_time) or normalized_range not in _DEFAULT_SLS_RANGES

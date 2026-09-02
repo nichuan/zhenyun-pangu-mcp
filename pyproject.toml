@@ -11,6 +11,11 @@ dependencies = [
     "cryptography>=41.0.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<9",
+]
+
 [project.scripts]
 zhenyun-pangu-mcp = "zhenyun_pangu_mcp.server:main"
 
