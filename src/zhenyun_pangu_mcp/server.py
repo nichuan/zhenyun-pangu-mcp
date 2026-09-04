@@ -3,9 +3,10 @@
 工具按前缀分组：
   - obs_*       日志查询（阿里云 SLS：国内公有云盘古 prod/dev/test；Loki：仅 AWS 海外）
   - archery_*   数据库查询（Archery 双站点 cn/aws + 盘古专属租户/实例/库列表）
+  - *_adapter_script* 适配器脚本发现、服务端解码、局部读取与正文搜索
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
   - search_repo 跨仓代码搜索（内置纯标准库文件遍历，零外部依赖）
-  - gitlab_*    GitLab 项目/代码/文件/目录/分支查询
+  - gitlab_*    已知 GitLab 项目/分支/路径的精确读取（搜索默认禁用）
   - search/get/save_* 认知层知识、SQL 模板、表目录和关联关系检索/维护
 
 工具选择原则：先用认知层工具发现稳定规则、历史方案和候选表，再用日志/Archery/
@@ -21,8 +22,13 @@ from datetime import datetime, timedelta, timezone
 import requests
 from mcp.server.fastmcp import FastMCP
 
-from . import archery, choerodon, loki, search, sls, sls_config, gitlab
-from .config import ARCHERY_INSTANCE_ALIASES, ARCHERY_DEFAULT_DB, LOKI_PLATFORMS
+from . import adapter_scripts, archery, choerodon, loki, search, sls, sls_config, gitlab
+from .config import (
+    ARCHERY_INSTANCE_ALIASES,
+    ARCHERY_DEFAULT_DB,
+    GITLAB_SEARCH_ENABLED,
+    LOKI_PLATFORMS,
+)
 from .knowledge_base import service as kb
 
 mcp = FastMCP("zhenyun-pangu-mcp")
@@ -54,6 +60,10 @@ _SOURCE_MAP = {
     "archery_query_tenant": "archery",
     "archery_list_databases": "archery",
     "archery_list_instances": "archery",
+    "search_adapter_scripts": "adapter-script",
+    "get_adapter_script_info": "adapter-script",
+    "get_adapter_script_source": "adapter-script",
+    "search_adapter_script_source": "adapter-script",
     "search_repo": "local-repo",
     "gitlab_search_projects": "gitlab",
     "gitlab_search_code": "gitlab",
@@ -666,16 +676,152 @@ def search_repo(
 
 
 # ============================================================================
+# adapter_script_* 数据库存储脚本（Base64 仅停留在 MCP 内部）
+# ============================================================================
+
+@mcp.tool()
+def search_adapter_scripts(
+    tenant: str = "",
+    running_service: str = "",
+    query: str = "",
+    enabled_only: bool = True,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+    limit: int = 20,
+) -> str:
+    """检索租户二开、适配器和外部接口脚本元信息（只读，不返回脚本正文）。
+
+    二开、客户定制、ERP/WMS/OA 对接、回调、推送、同步、报文或字段映射问题，
+    应优先调用本工具，而不是只搜索本地 Java。tenant/running_service/query 至少提供一项；
+    ``query`` 匹配 task_code/description。命中 ``script_id`` 后先按需调用
+    search_adapter_script_source，再局部读取 get_adapter_script_source。
+    """
+    try:
+        data = adapter_scripts.service.search_scripts(
+            tenant=tenant,
+            service=running_service,
+            query=query,
+            enabled_only=enabled_only,
+            site=site,
+            instance=instance,
+            db=db,
+            limit=limit,
+        )
+        return _ok(data, "adapter-script")
+    except archery.ArcheryError as e:
+        return _err("adapter_script_query", str(e), retryable=True)
+    except adapter_scripts.AdapterScriptError as e:
+        return _err("adapter_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def get_adapter_script_info(
+    script_id: int,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """读取适配器脚本轻量元信息（只读，不读取或返回 Base64 正文）。
+
+    返回租户、运行服务、task_code、版本、优先级和缓存状态。只有源码已在缓存中
+    时才附带 decoded size/hash，避免为了 info 无条件读取完整脚本。
+    """
+    try:
+        return _ok(adapter_scripts.service.get_info(
+            script_id, site=site, instance=instance, db=db,
+        ), "adapter-script")
+    except archery.ArcheryError as e:
+        return _err("adapter_script_query", str(e), retryable=True)
+    except adapter_scripts.AdapterScriptError as e:
+        return _err("adapter_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def get_adapter_script_source(
+    script_id: int,
+    start_line: int = 1,
+    end_line: int = 0,
+    full: bool = False,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """读取服务端已解码的 JavaScript 源码（只读，永不返回 Base64）。
+
+    默认从 start_line 起返回 200 行，单次局部读取最多 500 行；同时传 start/end
+    可精确读取区间。只有确实需要全局分析时才设置 ``full=true``，定位字段、函数、
+    API 或错误时应先调用 search_adapter_script_source。
+    """
+    try:
+        return _ok(adapter_scripts.service.get_source(
+            script_id,
+            start_line=start_line,
+            end_line=end_line,
+            full=full,
+            site=site,
+            instance=instance,
+            db=db,
+        ), "adapter-script")
+    except archery.ArcheryError as e:
+        return _err("adapter_script_query", str(e), retryable=True)
+    except adapter_scripts.AdapterScriptError as e:
+        return _err("adapter_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def search_adapter_script_source(
+    script_id: int,
+    query: str,
+    context_lines: int = 10,
+    max_matches: int = 20,
+    regex: bool = False,
+    case_sensitive: bool = False,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """在服务端解码后的 JavaScript 中搜索并返回少量上下文（只读）。
+
+    适合定位字段、函数、接口地址、回调、报文映射或异常文本。默认按普通字符串、
+    不区分大小写搜索；除非确有需要，不要启用 regex。搜索结果只包含匹配区间，
+    不返回 Base64，也不默认返回完整脚本。
+    """
+    try:
+        return _ok(adapter_scripts.service.search_source(
+            script_id,
+            query,
+            context_lines=context_lines,
+            max_matches=max_matches,
+            regex=regex,
+            case_sensitive=case_sensitive,
+            site=site,
+            instance=instance,
+            db=db,
+        ), "adapter-script")
+    except archery.ArcheryError as e:
+        return _err("adapter_script_query", str(e), retryable=True)
+    except adapter_scripts.AdapterScriptError as e:
+        return _err("adapter_script", str(e), retryable=False)
+
+
+# ============================================================================
 # gitlab_* 代码平台（GitLab 仓库：项目/代码/文件/目录/分支，整合自 gitlab-code-mcp）
 # ============================================================================
 
 @mcp.tool()
 def gitlab_search_projects(query: str, per_page: int = 20) -> str:
-    """搜索 GitLab 项目（只读）。
+    """搜索 GitLab 项目（默认禁用；仅平台明确启用搜索后注册）。
 
     何时调用：不知道仓库的 project_id/path，或需要先确认标准库与二开库归属时；
     返回项目 id、完整路径、默认分支和网页地址，后续交给其它 gitlab_* 工具。
     """
+    if not GITLAB_SEARCH_ENABLED:
+        return _err(
+            "capability_disabled",
+            "GitLab 项目/代码搜索当前未启用，请直接使用 search_repo 检索本地代码。",
+            retryable=False,
+        )
     try:
         client = gitlab.GitLabClient()
         items = client.list_projects(query, per_page=per_page)
@@ -696,15 +842,17 @@ def gitlab_search_projects(query: str, per_page: int = 20) -> str:
 
 @mcp.tool()
 def gitlab_search_code(query: str, per_page: int = 20) -> str:
-    """GitLab 代码搜索（在配置的搜索根 group/project 下按关键词检索 blob）。
-
-    说明：自托管 GitLab 若未开启全局代码搜索索引，根 /search?scope=blobs 会返回 400，
-    此时本工具会**自动退化为仓库级搜索**（遍历搜索根 group 下各 project 调
-    repository/search?scope=blobs），仍可按关键词查找源码，但更慢且限定在配置的 group 内。
+    """GitLab 代码搜索（默认禁用；仅平台明确启用搜索后注册）。
 
     何时调用：知道类名、方法名、错误文本或配置键但不知道文件位置时；返回命中
     项目、路径、分支和行号，随后用 gitlab_get_file 读取完整文件核对上下文。
     """
+    if not GITLAB_SEARCH_ENABLED:
+        return _err(
+            "capability_disabled",
+            "GitLab 项目/代码搜索当前未启用，请直接使用 search_repo 检索本地代码。",
+            retryable=False,
+        )
     try:
         client = gitlab.GitLabClient()
         results = client.search_code(query, per_page=per_page)
@@ -725,12 +873,20 @@ def gitlab_search_code(query: str, per_page: int = 20) -> str:
         return _err("gitlab", str(e), retryable=True)
 
 
+# 已知不可用的搜索能力不暴露给 Agent，避免每次先等待失败再回退本地。
+# 精确分支、目录和文件读取工具在下方继续独立注册。
+if not GITLAB_SEARCH_ENABLED:
+    mcp.remove_tool("gitlab_search_projects")
+    mcp.remove_tool("gitlab_search_code")
+
+
 @mcp.tool()
 def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
     """读取 GitLab 仓库指定分支/引用下的完整文件（只读）。
 
-    何时调用：gitlab_search_code 或 gitlab_list_tree 已定位文件后，需要完整源码、
-    配置或版本上下文时；``project_id``、``path``、``ref`` 必须来自真实 GitLab 返回。
+    何时调用：用户/可靠证据已给出精确位置，或 gitlab_list_tree 已在已知项目内定位
+    文件后，需要完整源码、配置或版本上下文时；``project_id``、``path``、``ref``
+    必须来自真实证据，不能通过枚举模拟当前禁用的 GitLab 搜索。
     """
     try:
         content = gitlab.GitLabClient().get_file(project_id, path, ref=ref)

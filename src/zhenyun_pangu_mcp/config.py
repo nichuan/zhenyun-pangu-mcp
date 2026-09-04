@@ -126,6 +126,12 @@ GITLAB_BASE_URL = os.getenv("GITLAB_BASE_URL", "https://code.choerodon.com.cn")
 GITLAB_TOKEN = os.getenv("GITLAB_TOKEN", "")
 GITLAB_USERNAME = os.getenv("GITLAB_USERNAME", "")
 GITLAB_PASSWORD = os.getenv("GITLAB_PASSWORD", "")
+# 当前自托管 GitLab 未启用可靠的项目/代码搜索。默认不向 MCP 客户端暴露
+# gitlab_search_*，避免 Agent 先等待失败再回退本地；精确的分支/目录/文件读取
+# 能力仍可独立使用。平台能力恢复后需显式开启。
+GITLAB_SEARCH_ENABLED = os.getenv("GITLAB_SEARCH_ENABLED", "false").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 # 代码搜索根目录(限定在该 group / 根 project 下,避免全站噪声)
 # 仅传其一:PROJECT_ID 优先;GROUP 用于 /search 范围限定
 GITLAB_SEARCH_ROOT_ID = os.getenv("GITLAB_SEARCH_ROOT_ID", "")
@@ -139,6 +145,40 @@ GITLAB_SEARCH_DEFAULT_SCOPE = os.getenv("GITLAB_SEARCH_DEFAULT_SCOPE", "srm")
 # 需要跨仓检索时,请在 .env 显式配置 PG_ROOT 指向目标仓库目录。
 # ---------------------------------------------------------------------------
 PG_ROOT = os.getenv("PG_ROOT", str(PKG_ROOT))
+
+# ---------------------------------------------------------------------------
+# 适配器脚本读取（数据库保存 Base64(UTF-16BE)，MCP 边界内统一解码）
+# ---------------------------------------------------------------------------
+try:
+    ADAPTER_SCRIPT_CACHE_MAX_ENTRIES = max(
+        1, int(os.getenv("ADAPTER_SCRIPT_CACHE_MAX_ENTRIES", "256"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_CACHE_MAX_ENTRIES = 256
+try:
+    ADAPTER_SCRIPT_CACHE_TTL_SECONDS = max(
+        1, int(os.getenv("ADAPTER_SCRIPT_CACHE_TTL_SECONDS", "60"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_CACHE_TTL_SECONDS = 60
+try:
+    ADAPTER_SCRIPT_DEFAULT_LINES = max(
+        1, int(os.getenv("ADAPTER_SCRIPT_DEFAULT_LINES", "200"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_DEFAULT_LINES = 200
+try:
+    ADAPTER_SCRIPT_MAX_RANGE_LINES = max(
+        1, int(os.getenv("ADAPTER_SCRIPT_MAX_RANGE_LINES", "500"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_MAX_RANGE_LINES = 500
+try:
+    ADAPTER_SCRIPT_MAX_RANGE_CHARS = max(
+        1000, int(os.getenv("ADAPTER_SCRIPT_MAX_RANGE_CHARS", "200000"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_MAX_RANGE_CHARS = 200000
 
 # ---------------------------------------------------------------------------
 # 知识库 Supabase(知识/模板/表/关系 四张表所在元数据库,不存业务数据)
@@ -167,8 +207,12 @@ TABLE_RELATION_TABLE = os.getenv("TABLE_RELATION_TABLE", "table_relations")
 
 
 # ---------------------------------------------------------------------------
-# 统一 Embedding(NVIDIA 免费模型,2048 维;未配置 key 时检索降级为关键词)
+# 统一 Embedding（支持 NVIDIA / Voyage；未配置 key 时检索降级为关键词）
 # ---------------------------------------------------------------------------
+def get_embedding_provider_name() -> str:
+    return os.getenv("EMBEDDING_PROVIDER", "nvidia").strip().lower()
+
+
 def get_nvidia_api_key() -> str:
     return os.getenv("NVIDIA_API_KEY", "").strip() or os.getenv("EMBEDDING_API_KEY", "").strip()
 
@@ -179,6 +223,28 @@ def get_nvidia_embed_model() -> str:
 
 def get_nvidia_embed_url() -> str:
     return os.getenv("NVIDIA_EMBED_URL", "https://integrate.api.nvidia.com/v1/embeddings").strip()
+
+
+def get_nvidia_embed_dimension() -> int:
+    try:
+        return int(os.getenv("NVIDIA_EMBEDDING_DIMENSION", "2048"))
+    except ValueError:
+        return 2048
+
+
+def get_voyage_api_key() -> str:
+    return os.getenv("VOYAGE_API_KEY", "").strip()
+
+
+def get_voyage_embed_model() -> str:
+    return os.getenv("VOYAGE_EMBEDDING_MODEL", "voyage-4").strip()
+
+
+def get_voyage_embed_dimension() -> int:
+    try:
+        return int(os.getenv("VOYAGE_EMBEDDING_DIMENSION", "2048"))
+    except ValueError:
+        return 2048
 
 
 def get_semantic_match_threshold() -> float:

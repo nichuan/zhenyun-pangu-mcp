@@ -5,20 +5,23 @@
 
 依赖 .env 中的：
   SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY   （知识库，不存业务数据）
-  NVIDIA_API_KEY                             （语义向量，可选；未配置时检索降级为关键词）
+  NVIDIA_API_KEY / VOYAGE_API_KEY            （语义向量，可选；未配置时检索降级为关键词）
 
-设计要点（对齐「统一 embedding」）：
-  EmbeddingService 集中管理向量生成，三个表共用同一模型与维度(2048)，
-  未来更换 embedding model 只改这里。
+设计要点：
+  EmbeddingService 只负责 provider 适配和输入文本拼装，业务层只使用
+  embed_documents / embed_query；NVIDIA 的旧 embedding 列与 Voyage 的新列完全隔离。
 """
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
 
 from . import config
+from .embedding import EmbeddingConfigurationError, EmbeddingProvider, get_embedding_provider
+from .embedding import text as embedding_text
 
 logger = logging.getLogger(__name__)
 
@@ -104,83 +107,93 @@ def query_table(
 
 
 # --------------------------------------------------------------------------- #
-# 统一 Embedding 服务（NVIDIA 免费模型 nvidia/nv-embed-v1，2048 维）
+# 统一 Embedding 服务（provider 可通过 EMBEDDING_PROVIDER 切换）
 # --------------------------------------------------------------------------- #
 class EmbeddingService:
-    """集中管理知识/模板/表的向量生成。未配置 key 时 embed() 返回 None（调用方降级）。"""
+    """懒加载 provider；配置缺失时让调用方走关键词降级。"""
 
-    def __init__(self) -> None:
-        self.api_key = config.get_nvidia_api_key()
-        self.model = config.get_nvidia_embed_model()
-        self.url = config.get_nvidia_embed_url()
+    @property
+    def provider(self) -> EmbeddingProvider:
+        return get_embedding_provider()
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key)
-
-    def embed(self, text: str, input_type: str = "passage") -> list[float] | None:
-        """生成向量。input_type: 'passage' 入库 / 'query' 检索。失败返回 None。"""
-        if not self.api_key or not text.strip():
-            return None
-        payload: dict[str, Any] = {"input": text, "model": self.model}
-        if "nv-embedqa" in self.model:
-            payload["input_type"] = input_type
         try:
-            resp = requests.post(
-                self.url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            vec = data["data"][0]["embedding"]
-            return [float(x) for x in vec]
-        except Exception as e:  # noqa: BLE001 - 失败降级，不打断主流程
-            logger.warning("NVIDIA embedding 调用失败：%s", e)
-            return None
+            self.provider
+            return True
+        except EmbeddingConfigurationError as exc:
+            logger.info("embedding provider 不可用，语义检索降级为关键词：%s", exc)
+            return False
 
-    def embed_knowledge(self, payload: dict[str, Any]) -> list[float] | None:
-        return self.embed(self._compose_knowledge(payload), input_type="passage")
+    @property
+    def provider_name(self) -> str:
+        return self.provider.provider_name
 
-    def embed_template(self, payload: dict[str, Any]) -> list[float] | None:
-        return self.embed(self._compose_template(payload), input_type="passage")
+    @property
+    def model_name(self) -> str:
+        return self.provider.model_name
 
-    def embed_table(self, name: str, comment: str, description: str, tags: list[str]) -> list[float] | None:
-        return self.embed(
-            f"{name} {comment or ''} {description or ''} " + " ".join(tags or []),
-            input_type="passage",
-        )
+    @property
+    def dimension(self) -> int:
+        return self.provider.dimension
+
+    @property
+    def vector_column(self) -> str:
+        """当前 provider 的向量列；voyage 不会覆盖旧 embedding。"""
+        if self.available:
+            return self.provider.vector_column
+        return "embedding_voyage" if config.get_embedding_provider_name() == "voyage" else "embedding"
+
+    def metadata_payload(self) -> dict[str, Any]:
+        """返回 provider 专属元数据；NVIDIA 旧写入路径不增加旧库不存在的列。"""
+        if self.provider_name != "voyage":
+            return {}
+        return {
+            "embedding_voyage_provider": self.provider_name,
+            "embedding_voyage_model": self.model_name,
+            "embedding_voyage_dimension": self.dimension,
+            "embedding_voyage_updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """显式使用 document 模式，供入库和批量回填调用。"""
+        return self.provider.embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        """显式使用 query 模式，供语义检索调用。"""
+        return self.provider.embed_query(text)
+
+    def embed_knowledge(self, payload: dict[str, Any]) -> list[float]:
+        return self.embed_documents([embedding_text.compose_knowledge(payload)])[0]
+
+    def embed_template(self, payload: dict[str, Any]) -> list[float]:
+        return self.embed_documents([embedding_text.compose_template(payload)])[0]
+
+    def embed_table(self, name: str, comment: str, description: str, tags: list[str]) -> list[float]:
+        return self.embed_documents([embedding_text.compose_table(name, comment, description, tags)])[0]
+
+    def rpc_name(self, resource: str) -> str:
+        """返回与当前 provider 配套的独立检索 RPC，防止异构向量混查。"""
+        names = {
+            "nvidia": {
+                "knowledge": "match_knowledge_docs",
+                "template": "match_sql_templates",
+                "table": "search_table_catalog",
+            },
+            "voyage": {
+                "knowledge": "match_knowledge_docs_voyage",
+                "template": "match_sql_templates_voyage",
+                "table": "search_table_catalog_voyage",
+            },
+        }
+        try:
+            return names[self.provider_name][resource]
+        except KeyError as exc:
+            raise ValueError(f"未知的 embedding 检索资源：{resource}") from exc
 
     # ---- 向量字面量（Supabase REST 需转成 pgvector 文本） ----
     @staticmethod
     def to_literal(emb: list[float]) -> str:
         return "[" + ",".join(f"{x:.8g}" for x in emb) + "]"
-
-    # ---- 各表向量组合文本 ----
-    @staticmethod
-    def _compose_knowledge(p: dict[str, Any]) -> str:
-        parts = [
-            p.get("title") or "", p.get("knowledge_type") or "", p.get("system") or "",
-            p.get("module") or "", p.get("summary") or "",
-            " ".join(p.get("tags") or []), " ".join(p.get("core_tables") or []),
-            p.get("content_md") or "",
-        ]
-        return "\n".join(x for x in parts if x).strip()
-
-    @staticmethod
-    def _compose_template(p: dict[str, Any]) -> str:
-        parts = [
-            p.get("title") or "", p.get("category") or "", p.get("system") or "",
-            p.get("scenario") or "", " ".join(p.get("keywords") or []),
-            " ".join(p.get("core_tables") or []), p.get("sql_text") or "",
-            p.get("problem_description") or "", p.get("symptom") or "",
-            p.get("root_cause") or "", p.get("business_domain") or "",
-        ]
-        return "\n".join(x for x in parts if x).strip()
-
 
 embedding = EmbeddingService()

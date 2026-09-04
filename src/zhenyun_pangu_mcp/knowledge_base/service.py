@@ -366,8 +366,8 @@ def save_knowledge(
             payload["verified_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if sb.embedding.available:
             emb = sb.embedding.embed_knowledge(payload)
-            if emb is not None:
-                payload["embedding"] = sb.embedding.to_literal(emb)
+            payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
+            payload.update(sb.embedding.metadata_payload())
         row = repo.insert_knowledge(payload)
         return f"✅ 知识已沉淀（id={row.get('id')}）。\n\n" + fmt_knowledge(row)
     except Exception as e:  # noqa: BLE001
@@ -432,8 +432,8 @@ def update_knowledge(
                 "content_md": payload.get("content_md") or existing.get("content_md") or "",
             }
             emb = sb.embedding.embed_knowledge(merged)
-            if emb is not None:
-                payload["embedding"] = sb.embedding.to_literal(emb)
+            payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
+            payload.update(sb.embedding.metadata_payload())
         row = repo.update_knowledge(int(doc_id), payload)
         return f"✅ 知识 id={doc_id} 已更新。\n\n" + (fmt_knowledge(row) if row else "（无返回行）")
     except Exception as e:  # noqa: BLE001
@@ -484,8 +484,8 @@ def save_sql_template(
             payload["verified_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if sb.embedding.available:
             emb = sb.embedding.embed_template(payload)
-            if emb is not None:
-                payload["embedding"] = sb.embedding.to_literal(emb)
+            payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
+            payload.update(sb.embedding.metadata_payload())
         row = repo.insert_template(payload)
         return f"✅ 模板已沉淀（id={row.get('id')}）。\n\n" + fmt_template(row)
     except Exception as e:  # noqa: BLE001
@@ -555,6 +555,26 @@ def update_sql_template(
             payload["verified_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if not payload:
             return "⚠️ 未提供需要更新的字段。"
+        # 修改影响语义向量的字段时，只更新当前 provider 对应的向量列。
+        template_vector_fields = {
+            "title", "scenario", "sql_text", "category", "system",
+            "business_domain", "keywords", "core_tables",
+        }
+        if sb.embedding.available and template_vector_fields & payload.keys():
+            existing = repo.get_template(int(template_id))
+            if existing is None:
+                return f"⚠️ 未找到 id={template_id} 的模板，未更新。"
+            merged = {
+                field: payload.get(field) if field in payload else (existing.get(field) or "")
+                for field in (
+                    "title", "category", "system", "scenario", "keywords",
+                    "core_tables", "sql_text", "problem_description", "symptom",
+                    "root_cause", "business_domain",
+                )
+            }
+            emb = sb.embedding.embed_template(merged)
+            payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
+            payload.update(sb.embedding.metadata_payload())
         row = repo.update_template(int(template_id), payload)
         return f"✅ 模板 id={template_id} 已更新。\n\n" + (fmt_template(row) if row else "（无返回行）")
     except Exception as e:  # noqa: BLE001
@@ -636,7 +656,19 @@ def upsert_table_knowledge(
             patch["db_name"] = db_name
         if not patch:
             return "⚠️ 请提供 description / tags / db_name 至少一项。"
-        row = repo.upsert_table_knowledge(table_name.strip().lower(), patch)
+        normalized_name = table_name.strip().lower()
+        target_db = patch.get("db_name") or "srm"
+        if sb.embedding.available:
+            existing = repo.get_table(normalized_name, target_db) or {}
+            vector = sb.embedding.embed_table(
+                normalized_name,
+                existing.get("table_comment") or "",
+                patch.get("description") or existing.get("description") or "",
+                patch.get("tags") if "tags" in patch else (existing.get("tags") or []),
+            )
+            patch[sb.embedding.vector_column] = sb.embedding.to_literal(vector)
+            patch.update(sb.embedding.metadata_payload())
+        row = repo.upsert_table_knowledge(normalized_name, patch)
         return f"✅ 已更新表 `{table_name}` 元数据。" if row else f"⚠️ 表 `{table_name}` 更新未返回行。"
     except Exception as e:  # noqa: BLE001
         return _err(e)

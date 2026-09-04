@@ -1,6 +1,7 @@
 """GitLab 代码平台客户端（整合自 gitlab-code-mcp，纯客户端，无 MCP 依赖）。
 
-提供：项目搜索、代码搜索、文件读取、目录树、分支列表。
+提供：文件读取、目录树、分支列表，以及由 GITLAB_SEARCH_ENABLED 显式开启的
+项目/代码搜索。当前平台搜索能力默认关闭，避免 Agent 以失败调用做能力探测。
 认证：优先 GITLAB_TOKEN；缺失时回退 GITLAB_USERNAME/GITLAB_PASSWORD 走 OAuth2 密码授权。
 配置（从 .env 读取）：GITLAB_BASE_URL / GITLAB_TOKEN / GITLAB_USERNAME / GITLAB_PASSWORD /
 GITLAB_SEARCH_ROOT_ID / GITLAB_SEARCH_ROOT_GROUP / GITLAB_SEARCH_DEFAULT_SCOPE
@@ -18,6 +19,7 @@ from .config import (
     GITLAB_TOKEN,
     GITLAB_USERNAME,
     GITLAB_PASSWORD,
+    GITLAB_SEARCH_ENABLED,
     GITLAB_SEARCH_ROOT_ID,
     GITLAB_SEARCH_ROOT_GROUP,
 )
@@ -76,6 +78,14 @@ class GitLabClient:
                 "GITLAB_USERNAME/GITLAB_PASSWORD"
             )
 
+    @staticmethod
+    def _require_search_enabled() -> None:
+        if not GITLAB_SEARCH_ENABLED:
+            raise GitLabError(
+                "GitLab 项目/代码搜索当前未启用；请使用 search_repo 检索本地代码。"
+                "若已知 project_id、ref 和 path，可继续使用精确读取能力。"
+            )
+
     # ---------- API 封装 ----------
     def _get(self, path: str, params: Dict[str, Any] | None = None) -> Any:
         self._require_auth()
@@ -100,6 +110,7 @@ class GitLabClient:
     # ---------- 公共方法 ----------
     def list_projects(self, search: str, per_page: int = 20) -> List[Dict[str, Any]]:
         """按关键词搜索项目（含 namespace/path）。"""
+        self._require_search_enabled()
         params = {"scope": "projects", "search": search, "per_page": per_page}
         data = self._get("search", params)
         items = data or []
@@ -122,6 +133,7 @@ class GitLabClient:
         ``GET /projects/:id/repository/search?scope=blobs``（该接口不依赖全局索引，
         14.1.0 可用），从而仍可按关键词在源码中查找代码，仅速度较慢且需指定 group。
         """
+        self._require_search_enabled()
         params: Dict[str, Any] = {
             "scope": scope or "blobs",
             "search": query,

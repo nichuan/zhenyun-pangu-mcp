@@ -9,6 +9,7 @@ dependencies = [
     "requests>=2.31.0",
     "python-dotenv>=1.0.0",
     "cryptography>=41.0.0",
+    "voyageai==0.4.1",
 ]
 
 [dependency-groups]

@@ -72,11 +72,9 @@ def search_knowledge_semantic(
 ) -> list[dict[str, Any]]:
     if not sb.embedding.available:
         return []
-    q_emb = sb.embedding.embed(query, input_type="query")
-    if q_emb is None:
-        return []
+    q_emb = sb.embedding.embed_query(query)
     try:
-        return sb.rpc("match_knowledge_docs", {
+        return sb.rpc(sb.embedding.rpc_name("knowledge"), {
             "query_embedding": sb.embedding.to_literal(q_emb),
             "match_threshold": threshold if threshold is not None else sb.config.get_semantic_match_threshold(),
             "match_count": limit, "p_knowledge_type": knowledge_type,
@@ -195,11 +193,9 @@ def search_templates_semantic(
 ) -> list[dict[str, Any]]:
     if not sb.embedding.available:
         return []
-    q_emb = sb.embedding.embed(query, input_type="query")
-    if q_emb is None:
-        return []
+    q_emb = sb.embedding.embed_query(query)
     try:
-        return sb.rpc("match_sql_templates", {
+        return sb.rpc(sb.embedding.rpc_name("template"), {
             "query_embedding": sb.embedding.to_literal(q_emb),
             "match_threshold": threshold if threshold is not None else sb.config.get_semantic_match_threshold(),
             "match_count": limit, "p_category": category, "p_system": system,
@@ -338,11 +334,9 @@ def search_tables_semantic(
 ) -> list[dict[str, Any]]:
     if not sb.embedding.available:
         return []
-    q_emb = sb.embedding.embed(query, input_type="query")
-    if q_emb is None:
-        return []
+    q_emb = sb.embedding.embed_query(query)
     try:
-        return sb.rpc("search_table_catalog", {
+        return sb.rpc(sb.embedding.rpc_name("table"), {
             "query_embedding": sb.embedding.to_literal(q_emb),
             "match_count": limit, "filter_domain": domain, "filter_db": db_name,
         })
