@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from mcp.server.fastmcp import FastMCP
 
-from . import adapter_scripts, archery, choerodon, loki, search, sls, sls_config, gitlab
+from . import adapter_scripts, archery, choerodon, loki, search, sls, sls_config, gitlab, standalone_scripts
 from .config import (
     ARCHERY_INSTANCE_ALIASES,
     ARCHERY_DEFAULT_DB,
@@ -64,6 +64,10 @@ _SOURCE_MAP = {
     "get_adapter_script_info": "adapter-script",
     "get_adapter_script_source": "adapter-script",
     "search_adapter_script_source": "adapter-script",
+    "search_standalone_scripts": "standalone-script",
+    "get_standalone_script_info": "standalone-script",
+    "get_standalone_script_source": "standalone-script",
+    "search_standalone_script_source": "standalone-script",
     "search_repo": "local-repo",
     "gitlab_search_projects": "gitlab",
     "gitlab_search_code": "gitlab",
@@ -803,6 +807,135 @@ def search_adapter_script_source(
         return _err("adapter_script_query", str(e), retryable=True)
     except adapter_scripts.AdapterScriptError as e:
         return _err("adapter_script", str(e), retryable=False)
+
+
+# ============================================================================
+# standalone_script_* 独立脚本（Marmot 脚本库，rel-table 宽表虚拟表）
+# ============================================================================
+
+@mcp.tool()
+def search_standalone_scripts(
+    tenant: str = "",
+    query: str = "",
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+    limit: int = 20,
+) -> str:
+    """检索独立脚本（Marmot 脚本库）元信息（只读，不返回脚本正文）。
+
+    独立脚本与适配器埋点脚本（search_adapter_scripts）是两套体系：独立脚本
+    存于 rel-table 宽表 ``spfm_rel_table_record``（table_code=marmot_script_library），
+    无独立物理表；租户编码在 value2 槽位（tenant_id 恒为 0，勿按 tenant_id 过滤）。
+    适用于定时任务、打印模板、导入、消息提醒等非挂钩点二开脚本。
+    tenant/query 至少提供一项；``query`` 匹配脚本编码/描述。命中 ``script_id``
+    后按需调用 search_standalone_script_source，再局部读取 get_standalone_script_source。
+    """
+    try:
+        data = standalone_scripts.service.search_scripts(
+            tenant=tenant,
+            query=query,
+            site=site,
+            instance=instance,
+            db=db,
+            limit=limit,
+        )
+        return _ok(data, "standalone-script")
+    except archery.ArcheryError as e:
+        return _err("standalone_script_query", str(e), retryable=True)
+    except standalone_scripts.AdapterScriptError as e:
+        return _err("standalone_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def get_standalone_script_info(
+    script_id: int,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """读取独立脚本轻量元信息（只读，不读取或返回 Base64 正文）。
+
+    返回租户（value2）、脚本编码（value3）、描述（value4）、内容类型与更新时间。
+    只有源码已在缓存中时才附带 decoded size/hash。
+    """
+    try:
+        return _ok(standalone_scripts.service.get_info(
+            script_id, site=site, instance=instance, db=db,
+        ), "standalone-script")
+    except archery.ArcheryError as e:
+        return _err("standalone_script_query", str(e), retryable=True)
+    except standalone_scripts.AdapterScriptError as e:
+        return _err("standalone_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def get_standalone_script_source(
+    script_id: int,
+    start_line: int = 1,
+    end_line: int = 0,
+    full: bool = False,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """读取服务端已解码的独立脚本源码/模板正文（只读，永不返回 Base64）。
+
+    正文取自 longValue 槽位（Base64，服务端自动探测 UTF-16LE/UTF-16BE/UTF-8 解码）。
+    默认从 start_line 起返回 200 行，单次局部读取最多 500 行；只有确实需要全局
+    分析时才设置 ``full=true``，定位字段、函数或报文时应先调用
+    search_standalone_script_source。
+    """
+    try:
+        return _ok(standalone_scripts.service.get_source(
+            script_id,
+            start_line=start_line,
+            end_line=end_line,
+            full=full,
+            site=site,
+            instance=instance,
+            db=db,
+        ), "standalone-script")
+    except archery.ArcheryError as e:
+        return _err("standalone_script_query", str(e), retryable=True)
+    except standalone_scripts.AdapterScriptError as e:
+        return _err("standalone_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def search_standalone_script_source(
+    script_id: int,
+    query: str,
+    context_lines: int = 10,
+    max_matches: int = 20,
+    regex: bool = False,
+    case_sensitive: bool = False,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """在服务端解码后的独立脚本中搜索并返回少量上下文（只读）。
+
+    适合定位字段、函数、接口地址、报文映射或异常文本。默认按普通字符串、
+    不区分大小写搜索；除非确有需要，不要启用 regex。搜索结果只包含匹配区间，
+    不返回 Base64，也不默认返回完整脚本。
+    """
+    try:
+        return _ok(standalone_scripts.service.search_source(
+            script_id,
+            query,
+            context_lines=context_lines,
+            max_matches=max_matches,
+            regex=regex,
+            case_sensitive=case_sensitive,
+            site=site,
+            instance=instance,
+            db=db,
+        ), "standalone-script")
+    except archery.ArcheryError as e:
+        return _err("standalone_script_query", str(e), retryable=True)
+    except standalone_scripts.AdapterScriptError as e:
+        return _err("standalone_script", str(e), retryable=False)
 
 
 # ============================================================================
