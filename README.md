@@ -151,6 +151,25 @@ uv run zhenyun-pangu-mcp
 uv run python -m zhenyun_pangu_mcp
 ```
 
+## 语义向量（Cloudflare Workers AI）
+
+语义检索统一使用 Cloudflare Workers AI 的 `@cf/qwen/qwen3-embedding-0.6b`（1024 维），
+向量写入单列 `embedding`（`vector(1024)`）。免费层每天 10,000 Neurons，对本知识库规模足够。
+
+历史说明：早期支持 NVIDIA / Voyage 双 provider 并预留 `embedding_voyage` 双列做 A/B 对比。
+`nvidia/nv-embed-v1` 已被官方下线（410），Voyage 免费额度限速（3 RPM / 10K TPM）不适合批量回填，
+故整体切换到 Cloudflare Workers AI；双列设计与 `*_voyage` 检索 RPC 均已废弃，向量列维度由 2048 改为 1024。
+
+回填 / 重建向量（默认只处理 `embedding IS NULL` 的行，支持断点续跑）：
+
+```bash
+uv run python scripts/rebuild_embeddings.py --table all --batch-size 50
+uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
+```
+
+换模型或需要全量覆盖重算时加 `--force`（会覆盖该表全部已有向量）。
+未配置 `CF_API_TOKEN` / `CF_ACCOUNT_ID` 时，检索自动降级为关键词检索（不报错，但召回率下降）。
+
 ## 打包为 Codex 插件
 
 工作区中的 `custom-skills/` 与本 MCP 已打包为个人插件 `zhenyun-pangu-toolkit`。
@@ -195,6 +214,7 @@ uv run python -m zhenyun_pangu_mcp
 | | `GITLAB_SEARCH_ROOT_ID` / `GITLAB_SEARCH_ROOT_GROUP` | 代码搜索根目录（限定 group/project，避免全站噪声） |
 | 适配器脚本 | `ADAPTER_SCRIPT_CACHE_MAX_ENTRIES` / `ADAPTER_SCRIPT_CACHE_TTL_SECONDS` | 解码源码 LRU 容量与 TTL；版本/更新时间变化会立即形成新缓存键 |
 | | `ADAPTER_SCRIPT_DEFAULT_LINES` / `ADAPTER_SCRIPT_MAX_RANGE_LINES` / `ADAPTER_SCRIPT_MAX_RANGE_CHARS` | 默认与最大局部源码返回范围 |
+| Embedding | `CF_API_TOKEN` / `CF_ACCOUNT_ID` / `CF_EMBED_MODEL` / `CF_EMBEDDING_DIMENSION` | Cloudflare Workers AI 凭据（默认 `@cf/qwen/qwen3-embedding-0.6b` / 1024 维），向量写单列 `embedding`；未配置时语义检索降级为关键词 |
 | 其他 | `PG_ROOT` | 本地跨仓搜索根目录（默认本仓库根） |
 
 > 凭据请勿提交 git；`.env` 已由 `.gitignore` 排除，仅 `.env.example`（占位符版）入库。

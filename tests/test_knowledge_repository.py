@@ -56,12 +56,12 @@ def test_template_usage_is_incremented_by_rpc(monkeypatch):
     assert calls == [("increment_template_usage", {"p_template_id": 7})]
 
 
-def test_semantic_search_uses_provider_specific_voyage_rpc(monkeypatch):
+def test_semantic_search_uses_match_knowledge_docs_rpc(monkeypatch):
     calls = []
     fake_embedding = SimpleNamespace(
         available=True,
         embed_query=lambda _query: [0.1, 0.2],
-        rpc_name=lambda resource: {"knowledge": "match_knowledge_docs_voyage"}[resource],
+        rpc_name=lambda resource: {"knowledge": "match_knowledge_docs"}[resource],
         to_literal=lambda vector: str(vector),
     )
     monkeypatch.setattr(repo.sb, "embedding", fake_embedding)
@@ -70,7 +70,7 @@ def test_semantic_search_uses_provider_specific_voyage_rpc(monkeypatch):
     rows = repo.search_knowledge_semantic("报价", limit=3)
 
     assert rows == [{"id": 1}]
-    assert calls == [("match_knowledge_docs_voyage", {
+    assert calls == [("match_knowledge_docs", {
         "query_embedding": "[0.1, 0.2]",
         "match_threshold": 0.5,
         "match_count": 3,

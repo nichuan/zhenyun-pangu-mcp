@@ -5,16 +5,15 @@
 
 依赖 .env 中的：
   SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY   （知识库，不存业务数据）
-  NVIDIA_API_KEY / VOYAGE_API_KEY            （语义向量，可选；未配置时检索降级为关键词）
+  CF_API_TOKEN / CF_ACCOUNT_ID               （语义向量，可选；未配置时检索降级为关键词）
 
 设计要点：
   EmbeddingService 只负责 provider 适配和输入文本拼装，业务层只使用
-  embed_documents / embed_query；NVIDIA 的旧 embedding 列与 Voyage 的新列完全隔离。
+  embed_documents / embed_query；向量统一写入单列 embedding（vector(1024)）。
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -139,21 +138,10 @@ class EmbeddingService:
 
     @property
     def vector_column(self) -> str:
-        """当前 provider 的向量列；voyage 不会覆盖旧 embedding。"""
+        """向量写入列：统一使用单列 embedding。"""
         if self.available:
             return self.provider.vector_column
-        return "embedding_voyage" if config.get_embedding_provider_name() == "voyage" else "embedding"
-
-    def metadata_payload(self) -> dict[str, Any]:
-        """返回 provider 专属元数据；NVIDIA 旧写入路径不增加旧库不存在的列。"""
-        if self.provider_name != "voyage":
-            return {}
-        return {
-            "embedding_voyage_provider": self.provider_name,
-            "embedding_voyage_model": self.model_name,
-            "embedding_voyage_dimension": self.dimension,
-            "embedding_voyage_updated_at": datetime.now(timezone.utc).isoformat(),
-        }
+        return "embedding"
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """显式使用 document 模式，供入库和批量回填调用。"""
@@ -173,21 +161,14 @@ class EmbeddingService:
         return self.embed_documents([embedding_text.compose_table(name, comment, description, tags)])[0]
 
     def rpc_name(self, resource: str) -> str:
-        """返回与当前 provider 配套的独立检索 RPC，防止异构向量混查。"""
+        """向量检索 RPC 名，与 schema.sql 中基于单列 embedding 的 RPC 一一对应。"""
         names = {
-            "nvidia": {
-                "knowledge": "match_knowledge_docs",
-                "template": "match_sql_templates",
-                "table": "search_table_catalog",
-            },
-            "voyage": {
-                "knowledge": "match_knowledge_docs_voyage",
-                "template": "match_sql_templates_voyage",
-                "table": "search_table_catalog_voyage",
-            },
+            "knowledge": "match_knowledge_docs",
+            "template": "match_sql_templates",
+            "table": "search_table_catalog",
         }
         try:
-            return names[self.provider_name][resource]
+            return names[resource]
         except KeyError as exc:
             raise ValueError(f"未知的 embedding 检索资源：{resource}") from exc
 

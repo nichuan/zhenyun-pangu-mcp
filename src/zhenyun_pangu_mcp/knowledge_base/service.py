@@ -367,7 +367,6 @@ def save_knowledge(
         if sb.embedding.available:
             emb = sb.embedding.embed_knowledge(payload)
             payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
-            payload.update(sb.embedding.metadata_payload())
         row = repo.insert_knowledge(payload)
         return f"✅ 知识已沉淀（id={row.get('id')}）。\n\n" + fmt_knowledge(row)
     except Exception as e:  # noqa: BLE001
@@ -433,7 +432,6 @@ def update_knowledge(
             }
             emb = sb.embedding.embed_knowledge(merged)
             payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
-            payload.update(sb.embedding.metadata_payload())
         row = repo.update_knowledge(int(doc_id), payload)
         return f"✅ 知识 id={doc_id} 已更新。\n\n" + (fmt_knowledge(row) if row else "（无返回行）")
     except Exception as e:  # noqa: BLE001
@@ -485,7 +483,6 @@ def save_sql_template(
         if sb.embedding.available:
             emb = sb.embedding.embed_template(payload)
             payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
-            payload.update(sb.embedding.metadata_payload())
         row = repo.insert_template(payload)
         return f"✅ 模板已沉淀（id={row.get('id')}）。\n\n" + fmt_template(row)
     except Exception as e:  # noqa: BLE001
@@ -574,7 +571,6 @@ def update_sql_template(
             }
             emb = sb.embedding.embed_template(merged)
             payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
-            payload.update(sb.embedding.metadata_payload())
         row = repo.update_template(int(template_id), payload)
         return f"✅ 模板 id={template_id} 已更新。\n\n" + (fmt_template(row) if row else "（无返回行）")
     except Exception as e:  # noqa: BLE001
@@ -667,7 +663,6 @@ def upsert_table_knowledge(
                 patch.get("tags") if "tags" in patch else (existing.get("tags") or []),
             )
             patch[sb.embedding.vector_column] = sb.embedding.to_literal(vector)
-            patch.update(sb.embedding.metadata_payload())
         row = repo.upsert_table_knowledge(normalized_name, patch)
         return f"✅ 已更新表 `{table_name}` 元数据。" if row else f"⚠️ 表 `{table_name}` 更新未返回行。"
     except Exception as e:  # noqa: BLE001

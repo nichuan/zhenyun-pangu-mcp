@@ -9,7 +9,7 @@
 
 -- 启用模糊检索扩展（中文/子串匹配）
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
--- 启用向量检索扩展（语义匹配，NVIDIA nv-embed-v1 2048 维）
+-- 启用向量检索扩展（语义匹配，Qwen3-Embedding-0.6B 1024 维）
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ============================================================================
@@ -31,12 +31,7 @@ CREATE TABLE IF NOT EXISTS knowledge_docs (
     core_tables         TEXT[] DEFAULT '{}',                             -- 关联核心表（对齐 table_catalog.table_name）
     related_template_ids BIGINT[] DEFAULT '{}',                          -- 关联 SQL 模板 id（对齐 sql_templates.id）
     tags                TEXT[] DEFAULT '{}',                             -- 标签/关键词
-    embedding           vector(2048),                                    -- NVIDIA 旧语义向量（保留用于回滚）
-    embedding_voyage    vector(2048),                                    -- Voyage A/B 语义向量（voyage-4，2048 维）
-    embedding_voyage_provider TEXT,
-    embedding_voyage_model TEXT,
-    embedding_voyage_dimension INTEGER,
-    embedding_voyage_updated_at TIMESTAMPTZ,
+    embedding           vector(1024),                                    -- Qwen3-Embedding-0.6B 语义向量（1024 维，via Cloudflare Workers AI）
     status              TEXT NOT NULL DEFAULT 'draft',                   -- 事实等级：draft(草稿)/verified(已验证)/deprecated(废弃)/archived(归档)
     source_type         TEXT NOT NULL DEFAULT 'manual',                  -- 来源：manual(人工)/migration(迁移)/generated(自动生成)/experience(经验沉淀)/official(官方文档)
     verified_at         TIMESTAMPTZ,                                     -- 验证时间（status=verified 时建议填写）
@@ -62,7 +57,8 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_docs_system ON knowledge_docs (system);
 CREATE INDEX IF NOT EXISTS idx_knowledge_docs_module ON knowledge_docs (module);
 CREATE INDEX IF NOT EXISTS idx_knowledge_docs_status ON knowledge_docs (status);
 
--- 注意：pgvector 的 HNSW / IVFFlat 索引均限制最多 2000 维，而 nv-embed-v1 返回 2048 维，
+-- 注意：pgvector 的 HNSW / IVFFlat 索引均限制最多 2000 维，qwen3-embedding-0.6b 返回 1024 维（低于上限），
+-- 但知识库规模小（数千条），顺序扫描精确余弦检索已足够；若规模上万可再加 hnsw 索引。
 -- 因此此处【不建向量索引】，改用顺序扫描做精确余弦检索（cosine）。知识库规模小（数百条），
 -- 顺序扫描性能完全足够，且保留完整 2048 维语义信息。
 -- 若后续换用 ≤2000 维模型并需要 ANN 加速，可改为 hnsw (embedding vector_cosine_ops)。
@@ -231,12 +227,7 @@ CREATE TABLE IF NOT EXISTS sql_templates (
     verified_by         TEXT,
     created_by          TEXT,
     usage_count         INTEGER NOT NULL DEFAULT 0,
-    embedding           vector(2048),                                    -- NVIDIA 旧语义向量（保留用于回滚）
-    embedding_voyage    vector(2048),
-    embedding_voyage_provider TEXT,
-    embedding_voyage_model TEXT,
-    embedding_voyage_dimension INTEGER,
-    embedding_voyage_updated_at TIMESTAMPTZ,
+    embedding           vector(1024),                                    -- Qwen3-Embedding-0.6B 语义向量（1024 维，via Cloudflare Workers AI）
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -275,12 +266,7 @@ CREATE TABLE IF NOT EXISTS table_catalog (
     tags          TEXT[] NOT NULL DEFAULT '{}',
     verified      BOOLEAN NOT NULL DEFAULT FALSE,
     usage_count   INTEGER NOT NULL DEFAULT 0,
-    embedding     vector(2048),                                         -- NVIDIA 旧语义向量（保留用于回滚）
-    embedding_voyage vector(2048),
-    embedding_voyage_provider TEXT,
-    embedding_voyage_model TEXT,
-    embedding_voyage_dimension INTEGER,
-    embedding_voyage_updated_at TIMESTAMPTZ,
+    embedding     vector(1024),                                         -- Qwen3-Embedding-0.6B 语义向量（1024 维，via Cloudflare Workers AI）
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (db_name, table_name)
@@ -508,105 +494,3 @@ GRANT EXECUTE ON FUNCTION search_table_catalog_keyword(text, int, text, text) TO
 GRANT EXECUTE ON FUNCTION search_table_catalog(vector, int, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION increment_template_usage(bigint) TO service_role;
 GRANT EXECUTE ON FUNCTION increment_table_usage(text) TO service_role;
-
--- ============================================================================
--- Voyage A/B 语义检索 RPC（只读 embedding_voyage，不影响旧 NVIDIA RPC）
--- ============================================================================
-DROP FUNCTION IF EXISTS match_knowledge_docs_voyage(vector, float, int, text, text, text, text);
-CREATE OR REPLACE FUNCTION match_knowledge_docs_voyage(
-    query_embedding vector,
-    match_threshold float,
-    match_count int DEFAULT 10,
-    p_knowledge_type text DEFAULT NULL,
-    p_system text DEFAULT NULL,
-    p_module text DEFAULT NULL,
-    p_status text DEFAULT NULL
-)
-RETURNS TABLE (
-    id bigint, title text, knowledge_type text, system text, module text,
-    summary text, content_md text, tags text[], core_tables text[],
-    related_template_ids bigint[], status text, source_type text, similarity float
-)
-LANGUAGE sql STABLE
-AS $$
-    SELECT k.id, k.title, k.knowledge_type, k.system, k.module, k.summary,
-           k.content_md, k.tags, k.core_tables, k.related_template_ids,
-           k.status, k.source_type,
-           (1 - (k.embedding_voyage <=> query_embedding))::float AS similarity
-    FROM knowledge_docs k
-    WHERE k.embedding_voyage IS NOT NULL
-      AND (p_knowledge_type IS NULL OR k.knowledge_type = p_knowledge_type)
-      AND (p_system IS NULL OR k.system = p_system)
-      AND (p_module IS NULL OR k.module = p_module)
-      AND (p_status IS NULL OR k.status = p_status)
-      AND (1 - (k.embedding_voyage <=> query_embedding)) > match_threshold
-    ORDER BY k.embedding_voyage <=> query_embedding
-    LIMIT match_count;
-$$;
-
-DROP FUNCTION IF EXISTS match_sql_templates_voyage(vector, float, int, text, text, text, boolean);
-CREATE OR REPLACE FUNCTION match_sql_templates_voyage(
-    query_embedding vector,
-    match_threshold float,
-    match_count int DEFAULT 10,
-    p_category text DEFAULT NULL,
-    p_system text DEFAULT NULL,
-    p_business_domain text DEFAULT NULL,
-    p_verified_only boolean DEFAULT FALSE
-)
-RETURNS TABLE (
-    id bigint, title text, template_no text, category text, system text,
-    business_domain text, scenario text, sql_text text, keywords text[],
-    core_tables text[], risk_level text, status text, source_type text,
-    verified boolean, verified_at timestamptz, usage_count integer, similarity float
-)
-LANGUAGE sql STABLE
-AS $$
-    SELECT t.id, t.title, t.template_no, t.category, t.system,
-           t.business_domain, t.scenario, t.sql_text, t.keywords,
-           t.core_tables, t.risk_level, t.status, t.source_type,
-           t.verified, t.verified_at, t.usage_count,
-           (1 - (t.embedding_voyage <=> query_embedding))::float AS similarity
-    FROM sql_templates t
-    WHERE t.embedding_voyage IS NOT NULL
-      AND (p_category IS NULL OR t.category = p_category)
-      AND (p_system IS NULL OR t.system = p_system)
-      AND (p_business_domain IS NULL OR t.business_domain = p_business_domain)
-      AND (NOT p_verified_only OR t.verified)
-      AND (1 - (t.embedding_voyage <=> query_embedding)) > match_threshold
-    ORDER BY t.embedding_voyage <=> query_embedding
-    LIMIT match_count;
-$$;
-
-DROP FUNCTION IF EXISTS search_table_catalog_voyage(vector, int, text, text);
-CREATE OR REPLACE FUNCTION search_table_catalog_voyage(
-    query_embedding vector,
-    match_count int DEFAULT 5,
-    filter_domain text DEFAULT NULL,
-    filter_db text DEFAULT NULL
-)
-RETURNS TABLE (
-    id bigint, db_name text, table_name text, table_comment text,
-    description text, domain text, key_columns jsonb, entry_columns jsonb,
-    tags text[], verified boolean, usage_count integer, similarity float
-)
-LANGUAGE sql STABLE
-AS $$
-    SELECT t.id, t.db_name, t.table_name, t.table_comment, t.description,
-           t.domain, t.key_columns, t.entry_columns, t.tags, t.verified,
-           t.usage_count,
-           (1 - (t.embedding_voyage <=> query_embedding))::float AS similarity
-    FROM table_catalog t
-    WHERE t.embedding_voyage IS NOT NULL
-      AND (filter_domain IS NULL OR t.domain = filter_domain)
-      AND (filter_db IS NULL OR t.db_name = filter_db)
-    ORDER BY t.embedding_voyage <=> query_embedding
-    LIMIT match_count;
-$$;
-
-REVOKE ALL ON FUNCTION match_knowledge_docs_voyage(vector, float, int, text, text, text, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION match_sql_templates_voyage(vector, float, int, text, text, text, boolean) FROM PUBLIC;
-REVOKE ALL ON FUNCTION search_table_catalog_voyage(vector, int, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION match_knowledge_docs_voyage(vector, float, int, text, text, text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION match_sql_templates_voyage(vector, float, int, text, text, text, boolean) TO service_role;
-GRANT EXECUTE ON FUNCTION search_table_catalog_voyage(vector, int, text, text) TO service_role;

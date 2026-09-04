@@ -207,44 +207,32 @@ TABLE_RELATION_TABLE = os.getenv("TABLE_RELATION_TABLE", "table_relations")
 
 
 # ---------------------------------------------------------------------------
-# 统一 Embedding（支持 NVIDIA / Voyage；未配置 key 时检索降级为关键词）
+# 语义向量（Cloudflare Workers AI @cf/qwen/qwen3-embedding-0.6b）
+#
+# 免费层每天 10,000 Neurons，对本知识库规模足够；模型输出 1024 维，
+# embedding 列为 vector(1024)。未配置 key 时检索自动降级为关键词。
+#
+# 历史说明：早期支持 NVIDIA / Voyage 双 provider 并预留 embedding_voyage 双列做 A/B，
+# 向量列一度为 vector(2048)。因 nv-embed-v1 下线、Voyage 免费额度限速（3 RPM），
+# 现整体切到 Cloudflare Workers AI，向量统一写单列 embedding（vector(1024)）。
 # ---------------------------------------------------------------------------
-def get_embedding_provider_name() -> str:
-    return os.getenv("EMBEDDING_PROVIDER", "nvidia").strip().lower()
+def get_cf_api_token() -> str:
+    return os.getenv("CF_API_TOKEN", "").strip()
 
 
-def get_nvidia_api_key() -> str:
-    return os.getenv("NVIDIA_API_KEY", "").strip() or os.getenv("EMBEDDING_API_KEY", "").strip()
+def get_cf_account_id() -> str:
+    return os.getenv("CF_ACCOUNT_ID", "").strip()
 
 
-def get_nvidia_embed_model() -> str:
-    return os.getenv("NVIDIA_EMBED_MODEL", "nvidia/nv-embed-v1").strip()
+def get_cf_embed_model() -> str:
+    return os.getenv("CF_EMBED_MODEL", "@cf/qwen/qwen3-embedding-0.6b").strip()
 
 
-def get_nvidia_embed_url() -> str:
-    return os.getenv("NVIDIA_EMBED_URL", "https://integrate.api.nvidia.com/v1/embeddings").strip()
-
-
-def get_nvidia_embed_dimension() -> int:
+def get_cf_embed_dimension() -> int:
     try:
-        return int(os.getenv("NVIDIA_EMBEDDING_DIMENSION", "2048"))
+        return int(os.getenv("CF_EMBEDDING_DIMENSION", "1024"))
     except ValueError:
-        return 2048
-
-
-def get_voyage_api_key() -> str:
-    return os.getenv("VOYAGE_API_KEY", "").strip()
-
-
-def get_voyage_embed_model() -> str:
-    return os.getenv("VOYAGE_EMBEDDING_MODEL", "voyage-4").strip()
-
-
-def get_voyage_embed_dimension() -> int:
-    try:
-        return int(os.getenv("VOYAGE_EMBEDDING_DIMENSION", "2048"))
-    except ValueError:
-        return 2048
+        return 1024
 
 
 def get_semantic_match_threshold() -> float:
