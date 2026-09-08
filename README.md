@@ -22,6 +22,7 @@
 > - **数据能力**：`archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances`
 > - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，以只读查询为主，`choerodon_add_comment` 为需确认的写操作）
 > - **代码与脚本能力**：`search_repo`（本地跨仓搜索）+ `*_adapter_script*`（数据库脚本发现、服务端解码、搜索与局部读取）+ 已知路径的 `gitlab_list_branches/list_tree/get_file` 精确读取。当前 GitLab 项目/代码搜索默认禁用。
+> - **本地交付配置**：`marmot_get_delivery_config` 只读解析 `.env` 中的 `MARMOT_DELIVERY_ROOT`，供纯二开 Skill 决定产物位置。
 >
 > **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼查询类（`choerodon_*_issue` / `choerodon_list_*` / `choerodon_search_*` / `choerodon_get_*` / `choerodon_download_*`）、代码检索为**只读**，Agent 可自主调用。`archery_query` 的用户 SQL 只允许单条基础 `SELECT`、`EXPLAIN SELECT` 或 `SHOW CREATE TABLE`，不支持其它 `SHOW/DESC`、`WITH`、多语句、注释、函数/子查询、窗口函数、集合运算或任何写入语法；实例/库/表结构由专用工具提供。任何生产 INSERT/UPDATE/DELETE **不在本 MCP 提供**，统一由 Skill 生成 SQL 后交用户人工确认执行。认知层的 `search_*` / `get_*` / `diagnose_context` / `list_sql_templates` 为只读；`save_*`、`update_*`、`delete_*`、`add_table_relation`、`upsert_table_knowledge` 和使用统计工具会写入 knowledge_docs / sql_templates / table_catalog / table_relations 元数据，不影响业务数据，调用前应确认沉淀内容。`choerodon_add_comment` 会真实写入猪齿鱼评论，必须先确认内容；评论必须传规范 Markdown，禁止纯文本和原始 HTML，工具会负责 Markdown 渲染。
 
@@ -37,7 +38,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 
 ## 能力总览
 
-工具按前缀/能力分组（默认共 48 个；GitLab 搜索开启后增加 2 个）：
+工具按前缀/能力分组（默认共 54 个；GitLab 搜索开启后增加 2 个）：
 
 | 前缀 | 工具 | 说明 |
 |------|------|------|
@@ -50,9 +51,10 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `obs_*` | `obs_sls_query` / `obs_sls_targets` / `obs_log_query` / `obs_log_trace` / `obs_log_datasources` | 日志能力：阿里云 SLS（国内公有云盘古 prod + 非生产 dev/test 全覆盖）+ Loki（仅 AWS 海外全环境） |
 | `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` | 数据能力（Archery 双站点 cn/aws + 盘古专属租户/库/实例能力） |
 | `*_adapter_script*` | `search_adapter_scripts` / `get_adapter_script_info` / `search_adapter_script_source` / `get_adapter_script_source` | 数据库存储脚本：元信息发现、MCP 内 Base64(UTF-16BE) 解码、关键词搜索和按行读取；不向 Agent 返回 Base64 |
-| `choerodon_*` | `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_add_comment` | 业务系统能力：猪齿鱼协作（内置 Python 客户端，纯 HTTP 登录；前 8 个为只读查询，`choerodon_add_comment` 为写操作，需确认） |
+| `choerodon_*` | `choerodon_list_projects` / `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_add_comment` | 业务系统能力：猪齿鱼协作（可按 ID/名称/编码发现当前账号可访问项目；前 9 个为只读查询，`choerodon_add_comment` 为写操作，需确认） |
 | `gitlab_*` | `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 仅对已知 project/ref/path 做精确读取；`gitlab_search_projects/code` 默认不注册，避免失败后回退 |
 | `search_repo` | `search_repo` | 普通代码检索的默认入口：跨本地代码仓库搜索（内容 / 文件名 / 模块结构） |
+| 本地交付配置 | `marmot_get_delivery_config` | 只读返回纯二开产物根目录及可写性；不创建目录 |
 
 ## 知识库工具使用指南
 
@@ -216,6 +218,7 @@ uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
 | | `ADAPTER_SCRIPT_DEFAULT_LINES` / `ADAPTER_SCRIPT_MAX_RANGE_LINES` / `ADAPTER_SCRIPT_MAX_RANGE_CHARS` | 默认与最大局部源码返回范围 |
 | Embedding | `CF_API_TOKEN` / `CF_ACCOUNT_ID` / `CF_EMBED_MODEL` / `CF_EMBEDDING_DIMENSION` | Cloudflare Workers AI 凭据（默认 `@cf/qwen/qwen3-embedding-0.6b` / 1024 维），向量写单列 `embedding`；未配置时语义检索降级为关键词 |
 | 其他 | `PG_ROOT` | 本地跨仓搜索根目录（默认本仓库根） |
+| | `MARMOT_DELIVERY_ROOT` | Marmot 纯二开需求产物根目录；每台机器独立配置绝对路径，Skill 在其下按 `<issue>/<tenant>/...` 落地 |
 
 > 凭据请勿提交 git；`.env` 已由 `.gitignore` 排除，仅 `.env.example`（占位符版）入库。
 

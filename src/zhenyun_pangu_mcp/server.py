@@ -28,6 +28,7 @@ from .config import (
     ARCHERY_DEFAULT_DB,
     GITLAB_SEARCH_ENABLED,
     LOKI_PLATFORMS,
+    resolve_marmot_delivery_root,
 )
 from .knowledge_base import service as kb
 
@@ -49,6 +50,7 @@ def _json(value: object) -> str:
 # 兼容性：保留原有顶层业务字段（results/query/count 等），仅在结构外层补充 ok/meta，
 # 不破坏现有 Skill 对返回的解析。
 _SOURCE_MAP = {
+    "marmot_get_delivery_config": "local-config",
     "obs_log_query": "loki",
     "obs_log_trace": "loki",
     "obs_log_datasources": "loki",
@@ -92,6 +94,7 @@ _SOURCE_MAP = {
     "add_table_relation": "knowledge-base",
     "record_table_usage": "knowledge-base",
     "upsert_table_knowledge": "knowledge-base",
+    "choerodon_list_projects": "choerodon",
     "choerodon_query_issue": "choerodon",
     "choerodon_list_issue": "choerodon",
     "choerodon_search_users": "choerodon",
@@ -127,6 +130,31 @@ def _ok(data: object, source: str) -> str:
         meta.setdefault("source", source)
         meta.setdefault("observed_at", _now_str())
     return _json(data)
+
+
+# ============================================================================
+# 本地交付配置（只读）
+# ============================================================================
+
+@mcp.tool()
+def marmot_get_delivery_config() -> str:
+    """读取 Marmot 纯二开需求产物根目录配置（只读，不创建目录）。
+
+    配置来自 MCP `.env` 中的 `MARMOT_DELIVERY_ROOT`。返回解析后的绝对路径、
+    是否存在及是否可写，并给出固定的需求级目录约定。Skill 应优先使用用户在
+    当前请求中明确给出的目录，否则调用本工具；配置无效时不得回退到硬编码路径。
+    """
+    data = resolve_marmot_delivery_root()
+    data["layout"] = {
+        "requirement_root": "<output_root>/<issue>/<tenant>",
+        "request": "<output_root>/<issue>/<tenant>/request.md",
+        "artifacts": "<output_root>/<issue>/<tenant>/artifacts.json",
+        "srm-adaptor": "<output_root>/<issue>/<tenant>/srm-adaptor/<code>/entry.js",
+        "SCRIPT_LIB": "<output_root>/<issue>/<tenant>/SCRIPT_LIB/<code>/entry.js",
+        "CodeBlock": "<output_root>/<issue>/<tenant>/CodeBlock/<code>/entry.js",
+        "QueryBlock": "<output_root>/<issue>/<tenant>/QueryBlock/<code>/query.sql",
+    }
+    return _ok(data, "local-config")
 
 
 # ============================================================================
@@ -562,10 +590,22 @@ def _choerodon_call(dispatch_name: str, **kwargs) -> str:
 
 
 @mcp.tool()
+def choerodon_list_projects(keyword: str = "", size: int = 100) -> str:
+    """列出或搜索当前账号可访问的猪齿鱼项目（只读）。
+
+    keyword 可传项目 ID、名称或编码；为空时列出项目。返回的 projectId
+    应显式传给后续的 choerodon_list_issue / query_issue / search_users /
+    get_status_map / list_comments / list_attachments 等项目级工具。
+    """
+    return _choerodon_call("list_projects", keyword=keyword, size=size)
+
+
+@mcp.tool()
 def choerodon_query_issue(issue_id: str, project_id: str = "") -> str:
     """查询猪齿鱼单个任务/缺陷详情（含附件列表）。
 
-    issue_id 为工单加密 ID（来自列表结果）；project_id 可选,默认用 CHOERODON_PROJECT_ID。
+    issue_id 为工单加密 ID（来自列表结果）；project_id 可传任意可访问
+    项目的真实 ID，为空时默认用 CHOERODON_PROJECT_ID=58。
     返回 issueNum/完整编号 fullIssueNum(如 prod-bug-213849)/租户编码 tenantCode/项目编码 projectCode/
     summary/状态/优先级/类型/创建人/描述(HTML)/附件。
     """
@@ -582,8 +622,9 @@ def choerodon_list_issue(
 ) -> str:
     """条件查询猪齿鱼任务列表。
 
-    keyword 为概要模糊搜索；assignee 为经办人姓名（自动解析成员）；
-    status 为状态名（自动解析状态 id）。返回任务摘要列表。
+    keyword 为概要/任务编号模糊搜索；assignee 为经办人姓名（自动解析成员）；
+    status 为状态名（自动解析状态 id）。project_id 可传任意可访问项目的
+    真实 ID，为空时默认 58。返回任务摘要及其 projectId。
     """
     return _choerodon_call(
         "list_issue", keyword=keyword, assignee=assignee, status=status,
@@ -646,6 +687,8 @@ def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> 
 
     issue_id 为工单加密 ID；comment 必须是规范 Markdown（标题/列表/引用/代码块/
     加粗/行内代码等），不接受纯文本或原始 HTML；工具会将 Markdown 渲染为评论区 HTML。
+    猪齿鱼评论区是富文本容器，为稳妥展示请优先使用「加粗段落 + 无序/有序列表」，
+    少用 Markdown 表格、多级标题与引用块。
     ⚠️ 写操作：会真实写入猪齿鱼，调用前必须向用户确认评论内容无误。
     建议先调用 choerodon_list_comments 查看现状，再执行写入。
     """

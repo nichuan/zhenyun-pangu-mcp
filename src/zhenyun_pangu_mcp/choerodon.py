@@ -7,6 +7,7 @@
   4. 手动跟随重定向链,从 Location 提取 access_token
 
 API 采用真实网关 open-gateway.going-link.com 的真实路径:
+  - 项目列表:POST /cbase/choerodon/v1/organizations/{oid}/users/{uid}/projects/paging
   - 工作列表:POST /agile/v2/projects/{pid}/issues/work_list
   - 工单详情:GET  /agile/v1/projects/{pid}/issues/{issueId}
   - 用户搜索:POST /agile/v1/projects/{pid}/issues/users
@@ -322,7 +323,7 @@ def _full_issue_num(it: dict) -> str:
     return f"{prefix}-{pure}" if pure else prefix
 
 
-def _issue_brief(it: dict) -> dict:
+def _issue_brief(it: dict, project_id: str | None = None) -> dict:
     status = (it.get("statusVO") or {})
     itype = (it.get("issueTypeVO") or {})
     pri = (it.get("priorityVO") or {})
@@ -331,6 +332,7 @@ def _issue_brief(it: dict) -> dict:
         "issueId": str(it.get("issueId") or ""),
         "issueNum": str(it.get("issueNum") or ""),
         "fullIssueNum": _full_issue_num(it),
+        "projectId": str(project_id or it.get("projectId") or ""),
         "tenantCode": _tenant_code(it),
         "projectCode": _proj_code(it),
         "summary": str(it.get("summary") or ""),
@@ -365,7 +367,7 @@ def search_issues(keyword: str = "", size: int = 20, project_id: str | None = No
         })
     body = {"conditions": conditions, "treeFlag": True, "withSubIssues": False}
     data = _request("POST", path, json_body=body)
-    return [_issue_brief(it) for it in _list(data)]
+    return [_issue_brief(it, pid) for it in _list(data)]
 
 
 def get_issue_detail(issue_id: str, project_id: str | None = None) -> dict:
@@ -409,6 +411,7 @@ def get_issue_detail(issue_id: str, project_id: str | None = None) -> dict:
         "issueId": str(data.get("issueId") or issue_id),
         "issueNum": str(data.get("issueNum") or ""),
         "fullIssueNum": _full_issue_num(data),
+        "projectId": str(pid),
         "tenantCode": tenant_code,
         "projectCode": _proj_code(data),
         "summary": str(data.get("summary") or ""),
@@ -453,6 +456,107 @@ def search_tasks_by_person(name: str, size: int = 50, project_id: str | None = N
         return []
     return search_issues(size=size, project_id=project_id,
                          assignee_ids=[u["id"] for u in users])
+
+
+def _project_brief(project: dict) -> dict:
+    """将项目列表响应收敛为稳定的 MCP 输出。"""
+    project_id = str(project.get("id") or project.get("projectId") or "")
+    return {
+        "projectId": project_id,
+        "name": str(project.get("name") or project.get("projectName") or ""),
+        "code": str(project.get("code") or project.get("projectCode") or ""),
+        "organizationId": str(project.get("organizationId") or ORGANIZATION_ID),
+        "category": str(project.get("category") or ""),
+        "enabled": bool(project.get("enabled", True)),
+        "projectStatus": str(project.get("projectStatus") or ""),
+        "starFlag": bool(project.get("starFlag", False)),
+        "isDefault": project_id == str(DEFAULT_PROJECT_ID),
+    }
+
+
+def list_projects(keyword: str = "", size: int = 100) -> dict:
+    """列出当前账号在组织内可访问的项目，支持按 ID/名称/编码筛选。
+
+    当前部署的 projects/paging 对查询文本的服务端筛选不稳定，因此先分页
+    获取当前账号的可访问项目，再在 MCP 内做不区分大小写的精确/模糊筛选。
+    """
+    try:
+        result_size = max(1, min(int(size), 200))
+    except (TypeError, ValueError) as e:
+        raise ChoerodonError(f"项目列表 size 必须是整数: {size}") from e
+
+    current_user = _request("GET", "/iam/choerodon/v1/users/self")
+    if not isinstance(current_user, dict) or not current_user.get("id"):
+        raise ChoerodonError("无法获取当前猪齿鱼用户 id，不能查询可访问项目")
+
+    user_id = str(current_user["id"])
+    path = (
+        f"/cbase/choerodon/v1/organizations/{ORGANIZATION_ID}"
+        f"/users/{user_id}/projects/paging"
+    )
+    page_size = 200
+    projects: list[dict] = []
+    page = 0
+    # 防止异常分页响应造成无限请求；20 页已覆盖 4000 个可访问项目。
+    while page < 20:
+        data = _request(
+            "POST",
+            path,
+            params={"page": page, "size": page_size, "params": ""},
+            json_body={},
+        )
+        batch = _list(data)
+        projects.extend(_project_brief(project) for project in batch)
+
+        total = None
+        if isinstance(data, dict):
+            try:
+                total = int(data.get("totalElements"))
+            except (TypeError, ValueError):
+                total = None
+        if not batch or len(batch) < page_size or (total is not None and len(projects) >= total):
+            break
+        page += 1
+
+    # 某些项目列表可能因角色合并重复，按 projectId 稳定去重。
+    unique_projects: list[dict] = []
+    seen: set[str] = set()
+    for project in projects:
+        project_id = project["projectId"]
+        if not project_id or project_id in seen:
+            continue
+        seen.add(project_id)
+        unique_projects.append(project)
+
+    query = (keyword or "").strip().casefold()
+    matched = unique_projects
+    if query:
+        matched = [
+            project for project in unique_projects
+            if any(
+                query in str(project[field]).casefold()
+                for field in ("projectId", "name", "code")
+            )
+        ]
+
+        def match_rank(project: dict) -> tuple[int, str, str]:
+            values = [str(project[field]).casefold() for field in ("projectId", "name", "code")]
+            if query in values:
+                rank = 0
+            elif any(value.startswith(query) for value in values):
+                rank = 1
+            else:
+                rank = 2
+            return rank, project["name"].casefold(), project["projectId"]
+
+        matched = sorted(matched, key=match_rank)
+
+    return {
+        "total": len(matched),
+        "accessibleTotal": len(unique_projects),
+        "defaultProjectId": str(DEFAULT_PROJECT_ID),
+        "items": matched[:result_size],
+    }
 
 
 def list_attachments(issue_id: str, project_id: str | None = None) -> list:
@@ -582,6 +686,9 @@ def _md_to_html(text: str) -> str:
 
     支持：标题 #/##/###、代码块 ```、无序/有序列表、引用 >、表格、段落、加粗/斜体/行内代码。
     评论只接受规范 Markdown，不接受原始 HTML，避免编辑器混合解析导致样式异常。
+
+    猪齿鱼评论区是富文本容器：表格会渲染为带边框的 <table>，但为稳妥展示，
+    结构化内容优先用「加粗段落 + 无序/有序列表」，少用表格/多级标题/引用。
     """
     import re as _re
     lines = (text or "").splitlines()
@@ -717,7 +824,9 @@ def _md_to_html(text: str) -> str:
                 )
                 i += 1
             html.append(
-                "<table><thead><tr>" + header_html + "</tr></thead>"
+                '<table border="1" cellspacing="0" cellpadding="4" '
+                'style="border-collapse:collapse;width:100%">'
+                "<thead><tr>" + header_html + "</tr></thead>"
                 "<tbody>" + "".join(rows_html) + "</tbody></table>"
             )
             continue
@@ -790,6 +899,7 @@ def create_issue_comment(issue_id: str, comment: str, project_id: str | None = N
 
 # 工具名 -> 处理函数映射(供 server.py 调用,返回 dict)
 CHOERODON_DISPATCH = {
+    "list_projects": list_projects,
     "query_issue": lambda issue_id, project_id=None: get_issue_detail(issue_id, project_id),
     "list_issue": lambda keyword="", size=20, project_id=None,
                   assignee=None, status=None: list_issue_search(keyword, size, project_id, assignee, status),
@@ -809,12 +919,16 @@ def list_issue_search(keyword: str = "", size: int = 20, project_id: str | None 
     assignee_ids = None
     if assignee:
         users = search_users(assignee, project_id=project_id)
+        if not users:
+            return {"total": 0, "items": []}
         assignee_ids = [u["id"] for u in users]
     status_ids = None
     if status:
         smap = get_status_map(project_id)
         sid = smap.get(status)
-        status_ids = [sid] if sid else None
+        if not sid:
+            return {"total": 0, "items": []}
+        status_ids = [sid]
     items = search_issues(keyword=keyword, size=size, project_id=project_id,
                           assignee_ids=assignee_ids, status_ids=status_ids)
     return {"total": len(items), "items": items}
