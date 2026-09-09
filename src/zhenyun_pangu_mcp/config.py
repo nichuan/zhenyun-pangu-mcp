@@ -250,6 +250,46 @@ except ValueError:
     ADAPTER_SCRIPT_MAX_RANGE_CHARS = 200000
 
 # ---------------------------------------------------------------------------
+# 正式环境 ES(只读查询,整合自 es-prod;供 es_search / es_count / es_get 使用)
+# 按环境维护 prod / dev / test 三套链接与凭证(es_* 工具带 env 参数选择)。
+# prod 复用 ES_BASE_URL/ES_USERNAME/ES_PASSWORD(与 es-prod 原变量兼容);
+# dev/test 用 ES_DEV_*/ES_TEST_* 前缀。未配置的环境调用 es_* 时返回明确提示,
+# 不影响其他能力,也不影响采购员工作台 skill 使用(可降级 Kibana 人工查询)。
+# 铁律:仅查询,严禁任何写操作,单次最多 ES_MAX_SIZE 条。
+# ---------------------------------------------------------------------------
+def _es_url(key: str) -> str:
+    return os.getenv(key, "").strip().rstrip("/")
+
+
+ES_PROFILES = {
+    "prod": {
+        "base_url": _es_url("ES_BASE_URL"),
+        "username": os.getenv("ES_USERNAME", ""),
+        "password": os.getenv("ES_PASSWORD", ""),
+    },
+    "dev": {
+        "base_url": _es_url("ES_DEV_BASE_URL"),
+        "username": os.getenv("ES_DEV_USERNAME", ""),
+        "password": os.getenv("ES_DEV_PASSWORD", ""),
+    },
+    "test": {
+        "base_url": _es_url("ES_TEST_BASE_URL"),
+        "username": os.getenv("ES_TEST_USERNAME", ""),
+        "password": os.getenv("ES_TEST_PASSWORD", ""),
+    },
+}
+ES_MAX_SIZE = int(os.getenv("ES_MAX_SIZE", "100"))
+ES_VERIFY_SSL = os.getenv("ES_VERIFY_SSL", "true").lower() in ("1", "true", "yes", "on")
+
+
+def get_es_profile(env: str) -> dict:
+    """按环境返回 ES 配置 profile（base_url/username/password）；未知环境抛 RuntimeError。"""
+    profile = ES_PROFILES.get(env)
+    if profile is None:
+        raise RuntimeError(f"未知 ES 环境: {env}（可选 prod/dev/test）")
+    return profile
+
+# ---------------------------------------------------------------------------
 # 知识库 Supabase(知识/模板/表/关系 四张表所在元数据库,不存业务数据)
 # ---------------------------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
