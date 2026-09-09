@@ -4,9 +4,11 @@
   - obs_*       日志查询（阿里云 SLS：国内公有云盘古 prod/dev/test；Loki：仅 AWS 海外）
   - archery_*   数据库查询（Archery 双站点 cn/aws + 盘古专属租户/实例/库列表）
   - es_*        正式环境 ES 只读查询（整合自 es-prod；铁律：严禁写、单次 ≤ ES_MAX_SIZE）
+  - *_adapter_script* 适配器脚本发现、服务端解码、局部读取与正文搜索
+  - *_standalone_script* 独立脚本/API 检索与源码读取
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
   - search_repo 跨仓代码搜索（内置纯标准库文件遍历，零外部依赖）
-  - gitlab_*    GitLab 项目/代码/文件/目录/分支查询
+  - gitlab_*    已知 GitLab 项目/分支/路径的精确读取（搜索默认禁用）
   - search/get/save_* 认知层知识、SQL 模板、表目录和关联关系检索/维护
 
 工具选择原则：先用认知层工具发现稳定规则、历史方案和候选表，再用日志/Archery/
@@ -22,12 +24,19 @@ from datetime import datetime, timedelta, timezone
 import requests
 from mcp.server.fastmcp import FastMCP
 
-from . import archery, choerodon, es, loki, search, sls, sls_config, gitlab
-from .config import ARCHERY_INSTANCE_ALIASES, ARCHERY_DEFAULT_DB, LOKI_PLATFORMS
+from . import adapter_scripts, archery, choerodon, es, loki, search, sls, sls_config, gitlab, standalone_scripts
+from .config import (
+    ARCHERY_INSTANCE_ALIASES,
+    ARCHERY_DEFAULT_DB,
+    GITLAB_SEARCH_ENABLED,
+    LOKI_PLATFORMS,
+    resolve_marmot_delivery_root,
+)
 from .knowledge_base import service as kb
 
 mcp = FastMCP("zhenyun-pangu-mcp")
 BJ = timezone(timedelta(hours=8))
+MAX_LOG_QUERY_SPAN = 31 * 24 * 3600
 
 
 def _json(value: object) -> str:
@@ -43,6 +52,7 @@ def _json(value: object) -> str:
 # 兼容性：保留原有顶层业务字段（results/query/count 等），仅在结构外层补充 ok/meta，
 # 不破坏现有 Skill 对返回的解析。
 _SOURCE_MAP = {
+    "marmot_get_delivery_config": "local-config",
     "obs_log_query": "loki",
     "obs_log_trace": "loki",
     "obs_log_datasources": "loki",
@@ -54,6 +64,14 @@ _SOURCE_MAP = {
     "archery_query_tenant": "archery",
     "archery_list_databases": "archery",
     "archery_list_instances": "archery",
+    "search_adapter_scripts": "adapter-script",
+    "get_adapter_script_info": "adapter-script",
+    "get_adapter_script_source": "adapter-script",
+    "search_adapter_script_source": "adapter-script",
+    "search_standalone_scripts": "standalone-script",
+    "get_standalone_script_info": "standalone-script",
+    "get_standalone_script_source": "standalone-script",
+    "search_standalone_script_source": "standalone-script",
     "search_repo": "local-repo",
     "gitlab_search_projects": "gitlab",
     "gitlab_search_code": "gitlab",
@@ -78,6 +96,7 @@ _SOURCE_MAP = {
     "add_table_relation": "knowledge-base",
     "record_table_usage": "knowledge-base",
     "upsert_table_knowledge": "knowledge-base",
+    "choerodon_list_projects": "choerodon",
     "choerodon_query_issue": "choerodon",
     "choerodon_list_issue": "choerodon",
     "choerodon_search_users": "choerodon",
@@ -116,6 +135,31 @@ def _ok(data: object, source: str) -> str:
         meta.setdefault("source", source)
         meta.setdefault("observed_at", _now_str())
     return _json(data)
+
+
+# ============================================================================
+# 本地交付配置（只读）
+# ============================================================================
+
+@mcp.tool()
+def marmot_get_delivery_config() -> str:
+    """读取 Marmot 纯二开需求产物根目录配置（只读，不创建目录）。
+
+    配置来自 MCP `.env` 中的 `MARMOT_DELIVERY_ROOT`。返回解析后的绝对路径、
+    是否存在及是否可写，并给出固定的需求级目录约定。Skill 应优先使用用户在
+    当前请求中明确给出的目录，否则调用本工具；配置无效时不得回退到硬编码路径。
+    """
+    data = resolve_marmot_delivery_root()
+    data["layout"] = {
+        "requirement_root": "<output_root>/<issue>/<tenant>",
+        "request": "<output_root>/<issue>/<tenant>/request.md",
+        "artifacts": "<output_root>/<issue>/<tenant>/artifacts.json",
+        "srm-adaptor": "<output_root>/<issue>/<tenant>/srm-adaptor/<code>/entry.js",
+        "SCRIPT_LIB": "<output_root>/<issue>/<tenant>/SCRIPT_LIB/<code>/entry.js",
+        "CodeBlock": "<output_root>/<issue>/<tenant>/CodeBlock/<code>/entry.js",
+        "QueryBlock": "<output_root>/<issue>/<tenant>/QueryBlock/<code>/query.sql",
+    }
+    return _ok(data, "local-config")
 
 
 # ============================================================================
@@ -175,10 +219,30 @@ def _time_bounds(from_time: int | None, to_time: int | None, time_range: str) ->
     # 绝对时间 "YYYY-MM-DD HH:mm~HH:mm"（保留空格，避免 strptime 解析失败）
     if "~" in raw:
         parts = raw.split("~")
+        if len(parts) != 2:
+            raise ValueError('绝对时间格式错误，应为 "YYYY-MM-DD HH:mm~HH:mm"')
         start = int(datetime.strptime(parts[0].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=BJ).timestamp())
         end = int(datetime.strptime(parts[1].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=BJ).timestamp())
         return start, end
     return now - 7200, now
+
+
+def _validate_time_bounds(start: int, end: int) -> tuple[int, int]:
+    """拒绝反向/空时间窗和过宽查询，避免日志 API 被无意打爆。"""
+    if end <= start:
+        raise ValueError("时间范围无效：to_time 必须晚于 from_time")
+    span = end - start
+    if span > MAX_LOG_QUERY_SPAN:
+        raise ValueError("时间范围过大：单次日志查询最多支持 31 天")
+    return int(start), int(end)
+
+
+def _bounded_limit(value: int, maximum: int) -> int:
+    """把工具入参限制在服务端允许范围内，并把非法值转成明确的参数错误。"""
+    try:
+        return max(1, min(int(value), maximum))
+    except (TypeError, ValueError) as e:
+        raise ValueError("limit 必须是整数") from e
 
 
 def _timeout_hint(start: int, end: int) -> str:
@@ -254,8 +318,11 @@ def obs_log_query(
 
     warning = loki.warn_unscoped(query)
 
-    start, end = _time_bounds(from_time, to_time, time_range)
-    limit = max(1, min(int(limit), 5000))
+    try:
+        start, end = _validate_time_bounds(*_time_bounds(from_time, to_time, time_range))
+        limit = _bounded_limit(limit, 5000)
+    except ValueError as e:
+        return _err("bad_param", str(e), retryable=False)
     try:
         resp = client.loki_query_range(uid, query, start, end, limit, direction)
     except loki.LokiError as e:
@@ -328,8 +395,11 @@ def obs_log_trace(
     except loki.LokiError as e:
         return _err("config", str(e), retryable=False)
 
-    start, end = _time_bounds(from_time, to_time, time_range)
-    limit = max(1, min(int(limit), 5000))
+    try:
+        start, end = _validate_time_bounds(*_time_bounds(from_time, to_time, time_range))
+        limit = _bounded_limit(limit, 5000)
+    except ValueError as e:
+        return _err("bad_param", str(e), retryable=False)
     try:
         rows, meta = loki.query_trace(
             region, env, trace_id, start, end, limit, direction,
@@ -525,10 +595,22 @@ def _choerodon_call(dispatch_name: str, **kwargs) -> str:
 
 
 @mcp.tool()
+def choerodon_list_projects(keyword: str = "", size: int = 100) -> str:
+    """列出或搜索当前账号可访问的猪齿鱼项目（只读）。
+
+    keyword 可传项目 ID、名称或编码；为空时列出项目。返回的 projectId
+    应显式传给后续的 choerodon_list_issue / query_issue / search_users /
+    get_status_map / list_comments / list_attachments 等项目级工具。
+    """
+    return _choerodon_call("list_projects", keyword=keyword, size=size)
+
+
+@mcp.tool()
 def choerodon_query_issue(issue_id: str, project_id: str = "") -> str:
     """查询猪齿鱼单个任务/缺陷详情（含附件列表）。
 
-    issue_id 为工单加密 ID（来自列表结果）；project_id 可选,默认用 CHOERODON_PROJECT_ID。
+    issue_id 为工单加密 ID（来自列表结果）；project_id 可传任意可访问
+    项目的真实 ID，为空时默认用 CHOERODON_PROJECT_ID=58。
     返回 issueNum/完整编号 fullIssueNum(如 prod-bug-213849)/租户编码 tenantCode/项目编码 projectCode/
     summary/状态/优先级/类型/创建人/描述(HTML)/附件。
     """
@@ -545,8 +627,9 @@ def choerodon_list_issue(
 ) -> str:
     """条件查询猪齿鱼任务列表。
 
-    keyword 为概要模糊搜索；assignee 为经办人姓名（自动解析成员）；
-    status 为状态名（自动解析状态 id）。返回任务摘要列表。
+    keyword 为概要/任务编号模糊搜索；assignee 为经办人姓名（自动解析成员）；
+    status 为状态名（自动解析状态 id）。project_id 可传任意可访问项目的
+    真实 ID，为空时默认 58。返回任务摘要及其 projectId。
     """
     return _choerodon_call(
         "list_issue", keyword=keyword, assignee=assignee, status=status,
@@ -609,6 +692,8 @@ def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> 
 
     issue_id 为工单加密 ID；comment 必须是规范 Markdown（标题/列表/引用/代码块/
     加粗/行内代码等），不接受纯文本或原始 HTML；工具会将 Markdown 渲染为评论区 HTML。
+    猪齿鱼评论区是富文本容器，为稳妥展示请优先使用「加粗段落 + 无序/有序列表」，
+    少用 Markdown 表格、多级标题与引用块。
     ⚠️ 写操作：会真实写入猪齿鱼，调用前必须向用户确认评论内容无误。
     建议先调用 choerodon_list_comments 查看现状，再执行写入。
     """
@@ -643,16 +728,281 @@ def search_repo(
 
 
 # ============================================================================
+# adapter_script_* 数据库存储脚本（Base64 仅停留在 MCP 内部）
+# ============================================================================
+
+@mcp.tool()
+def search_adapter_scripts(
+    tenant: str = "",
+    running_service: str = "",
+    query: str = "",
+    enabled_only: bool = True,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+    limit: int = 20,
+) -> str:
+    """检索租户二开、适配器和外部接口脚本元信息（只读，不返回脚本正文）。
+
+    二开、客户定制、ERP/WMS/OA 对接、回调、推送、同步、报文或字段映射问题，
+    应优先调用本工具，而不是只搜索本地 Java。tenant/running_service/query 至少提供一项；
+    ``query`` 匹配 task_code/description。命中 ``script_id`` 后先按需调用
+    search_adapter_script_source，再局部读取 get_adapter_script_source。
+    """
+    try:
+        data = adapter_scripts.service.search_scripts(
+            tenant=tenant,
+            service=running_service,
+            query=query,
+            enabled_only=enabled_only,
+            site=site,
+            instance=instance,
+            db=db,
+            limit=limit,
+        )
+        return _ok(data, "adapter-script")
+    except archery.ArcheryError as e:
+        return _err("adapter_script_query", str(e), retryable=True)
+    except adapter_scripts.AdapterScriptError as e:
+        return _err("adapter_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def get_adapter_script_info(
+    script_id: int,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """读取适配器脚本轻量元信息（只读，不读取或返回 Base64 正文）。
+
+    返回租户、运行服务、task_code、版本、优先级和缓存状态。只有源码已在缓存中
+    时才附带 decoded size/hash，避免为了 info 无条件读取完整脚本。
+    """
+    try:
+        return _ok(adapter_scripts.service.get_info(
+            script_id, site=site, instance=instance, db=db,
+        ), "adapter-script")
+    except archery.ArcheryError as e:
+        return _err("adapter_script_query", str(e), retryable=True)
+    except adapter_scripts.AdapterScriptError as e:
+        return _err("adapter_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def get_adapter_script_source(
+    script_id: int,
+    start_line: int = 1,
+    end_line: int = 0,
+    full: bool = False,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """读取服务端已解码的 JavaScript 源码（只读，永不返回 Base64）。
+
+    默认从 start_line 起返回 200 行，单次局部读取最多 500 行；同时传 start/end
+    可精确读取区间。只有确实需要全局分析时才设置 ``full=true``，定位字段、函数、
+    API 或错误时应先调用 search_adapter_script_source。
+    """
+    try:
+        return _ok(adapter_scripts.service.get_source(
+            script_id,
+            start_line=start_line,
+            end_line=end_line,
+            full=full,
+            site=site,
+            instance=instance,
+            db=db,
+        ), "adapter-script")
+    except archery.ArcheryError as e:
+        return _err("adapter_script_query", str(e), retryable=True)
+    except adapter_scripts.AdapterScriptError as e:
+        return _err("adapter_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def search_adapter_script_source(
+    script_id: int,
+    query: str,
+    context_lines: int = 10,
+    max_matches: int = 20,
+    regex: bool = False,
+    case_sensitive: bool = False,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """在服务端解码后的 JavaScript 中搜索并返回少量上下文（只读）。
+
+    适合定位字段、函数、接口地址、回调、报文映射或异常文本。默认按普通字符串、
+    不区分大小写搜索；除非确有需要，不要启用 regex。搜索结果只包含匹配区间，
+    不返回 Base64，也不默认返回完整脚本。
+    """
+    try:
+        return _ok(adapter_scripts.service.search_source(
+            script_id,
+            query,
+            context_lines=context_lines,
+            max_matches=max_matches,
+            regex=regex,
+            case_sensitive=case_sensitive,
+            site=site,
+            instance=instance,
+            db=db,
+        ), "adapter-script")
+    except archery.ArcheryError as e:
+        return _err("adapter_script_query", str(e), retryable=True)
+    except adapter_scripts.AdapterScriptError as e:
+        return _err("adapter_script", str(e), retryable=False)
+
+
+# ============================================================================
+# standalone_script_* 独立脚本（Marmot 脚本库，rel-table 宽表虚拟表）
+# ============================================================================
+
+@mcp.tool()
+def search_standalone_scripts(
+    tenant: str = "",
+    query: str = "",
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+    limit: int = 20,
+) -> str:
+    """检索独立脚本（Marmot 脚本库）元信息（只读，不返回脚本正文）。
+
+    独立脚本与适配器埋点脚本（search_adapter_scripts）是两套体系：独立脚本
+    存于 rel-table 宽表 ``spfm_rel_table_record``（table_code=marmot_script_library），
+    无独立物理表；租户编码在 value2 槽位（tenant_id 恒为 0，勿按 tenant_id 过滤）。
+    适用于定时任务、打印模板、导入、消息提醒等非挂钩点二开脚本。
+    tenant/query 至少提供一项；``query`` 匹配脚本编码/描述。命中 ``script_id``
+    后按需调用 search_standalone_script_source，再局部读取 get_standalone_script_source。
+    """
+    try:
+        data = standalone_scripts.service.search_scripts(
+            tenant=tenant,
+            query=query,
+            site=site,
+            instance=instance,
+            db=db,
+            limit=limit,
+        )
+        return _ok(data, "standalone-script")
+    except archery.ArcheryError as e:
+        return _err("standalone_script_query", str(e), retryable=True)
+    except standalone_scripts.AdapterScriptError as e:
+        return _err("standalone_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def get_standalone_script_info(
+    script_id: int,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """读取独立脚本轻量元信息（只读，不读取或返回 Base64 正文）。
+
+    返回租户（value2）、脚本编码（value3）、描述（value4）、内容类型与更新时间。
+    只有源码已在缓存中时才附带 decoded size/hash。
+    """
+    try:
+        return _ok(standalone_scripts.service.get_info(
+            script_id, site=site, instance=instance, db=db,
+        ), "standalone-script")
+    except archery.ArcheryError as e:
+        return _err("standalone_script_query", str(e), retryable=True)
+    except standalone_scripts.AdapterScriptError as e:
+        return _err("standalone_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def get_standalone_script_source(
+    script_id: int,
+    start_line: int = 1,
+    end_line: int = 0,
+    full: bool = False,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """读取服务端已解码的独立脚本源码/模板正文（只读，永不返回 Base64）。
+
+    正文取自 longValue 槽位（Base64，服务端自动探测 UTF-16LE/UTF-16BE/UTF-8 解码）。
+    默认从 start_line 起返回 200 行，单次局部读取最多 500 行；只有确实需要全局
+    分析时才设置 ``full=true``，定位字段、函数或报文时应先调用
+    search_standalone_script_source。
+    """
+    try:
+        return _ok(standalone_scripts.service.get_source(
+            script_id,
+            start_line=start_line,
+            end_line=end_line,
+            full=full,
+            site=site,
+            instance=instance,
+            db=db,
+        ), "standalone-script")
+    except archery.ArcheryError as e:
+        return _err("standalone_script_query", str(e), retryable=True)
+    except standalone_scripts.AdapterScriptError as e:
+        return _err("standalone_script", str(e), retryable=False)
+
+
+@mcp.tool()
+def search_standalone_script_source(
+    script_id: int,
+    query: str,
+    context_lines: int = 10,
+    max_matches: int = 20,
+    regex: bool = False,
+    case_sensitive: bool = False,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+) -> str:
+    """在服务端解码后的独立脚本中搜索并返回少量上下文（只读）。
+
+    适合定位字段、函数、接口地址、报文映射或异常文本。默认按普通字符串、
+    不区分大小写搜索；除非确有需要，不要启用 regex。搜索结果只包含匹配区间，
+    不返回 Base64，也不默认返回完整脚本。
+    """
+    try:
+        return _ok(standalone_scripts.service.search_source(
+            script_id,
+            query,
+            context_lines=context_lines,
+            max_matches=max_matches,
+            regex=regex,
+            case_sensitive=case_sensitive,
+            site=site,
+            instance=instance,
+            db=db,
+        ), "standalone-script")
+    except archery.ArcheryError as e:
+        return _err("standalone_script_query", str(e), retryable=True)
+    except standalone_scripts.AdapterScriptError as e:
+        return _err("standalone_script", str(e), retryable=False)
+
+
+# ============================================================================
 # gitlab_* 代码平台（GitLab 仓库：项目/代码/文件/目录/分支，整合自 gitlab-code-mcp）
 # ============================================================================
 
 @mcp.tool()
 def gitlab_search_projects(query: str, per_page: int = 20) -> str:
-    """搜索 GitLab 项目（只读）。
+    """搜索 GitLab 项目（默认禁用；仅平台明确启用搜索后注册）。
 
     何时调用：不知道仓库的 project_id/path，或需要先确认标准库与二开库归属时；
     返回项目 id、完整路径、默认分支和网页地址，后续交给其它 gitlab_* 工具。
     """
+    if not GITLAB_SEARCH_ENABLED:
+        return _err(
+            "capability_disabled",
+            "GitLab 项目/代码搜索当前未启用，请直接使用 search_repo 检索本地代码。",
+            retryable=False,
+        )
     try:
         client = gitlab.GitLabClient()
         items = client.list_projects(query, per_page=per_page)
@@ -673,15 +1023,17 @@ def gitlab_search_projects(query: str, per_page: int = 20) -> str:
 
 @mcp.tool()
 def gitlab_search_code(query: str, per_page: int = 20) -> str:
-    """GitLab 代码搜索（在配置的搜索根 group/project 下按关键词检索 blob）。
-
-    说明：自托管 GitLab 若未开启全局代码搜索索引，根 /search?scope=blobs 会返回 400，
-    此时本工具会**自动退化为仓库级搜索**（遍历搜索根 group 下各 project 调
-    repository/search?scope=blobs），仍可按关键词查找源码，但更慢且限定在配置的 group 内。
+    """GitLab 代码搜索（默认禁用；仅平台明确启用搜索后注册）。
 
     何时调用：知道类名、方法名、错误文本或配置键但不知道文件位置时；返回命中
     项目、路径、分支和行号，随后用 gitlab_get_file 读取完整文件核对上下文。
     """
+    if not GITLAB_SEARCH_ENABLED:
+        return _err(
+            "capability_disabled",
+            "GitLab 项目/代码搜索当前未启用，请直接使用 search_repo 检索本地代码。",
+            retryable=False,
+        )
     try:
         client = gitlab.GitLabClient()
         results = client.search_code(query, per_page=per_page)
@@ -702,12 +1054,20 @@ def gitlab_search_code(query: str, per_page: int = 20) -> str:
         return _err("gitlab", str(e), retryable=True)
 
 
+# 已知不可用的搜索能力不暴露给 Agent，避免每次先等待失败再回退本地。
+# 精确分支、目录和文件读取工具在下方继续独立注册。
+if not GITLAB_SEARCH_ENABLED:
+    mcp.remove_tool("gitlab_search_projects")
+    mcp.remove_tool("gitlab_search_code")
+
+
 @mcp.tool()
 def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
     """读取 GitLab 仓库指定分支/引用下的完整文件（只读）。
 
-    何时调用：gitlab_search_code 或 gitlab_list_tree 已定位文件后，需要完整源码、
-    配置或版本上下文时；``project_id``、``path``、``ref`` 必须来自真实 GitLab 返回。
+    何时调用：用户/可靠证据已给出精确位置，或 gitlab_list_tree 已在已知项目内定位
+    文件后，需要完整源码、配置或版本上下文时；``project_id``、``path``、``ref``
+    必须来自真实证据，不能通过枚举模拟当前禁用的 GitLab 搜索。
     """
     try:
         content = gitlab.GitLabClient().get_file(project_id, path, ref=ref)
@@ -817,8 +1177,10 @@ def obs_sls_query(
     try:
         target = sls_config.resolve_target(system, environment)
         ak_id, ak_secret = sls_config.credentials(target)
-        limit = max(1, min(int(limit), 500))
-        start, end = _time_bounds(from_time or None, to_time or None, time_range)
+        limit = _bounded_limit(limit, 500)
+        start, end = _validate_time_bounds(
+            *_time_bounds(from_time or None, to_time or None, time_range)
+        )
 
         normalized_range = (time_range or "").strip().lower().replace(" ", "")
         explicit_window = bool(from_time or to_time) or normalized_range not in _DEFAULT_SLS_RANGES

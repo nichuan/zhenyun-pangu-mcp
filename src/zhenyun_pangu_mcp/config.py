@@ -110,8 +110,8 @@ LOKI_DATASOURCES = {
 CHOERODON_BASE_URL = os.getenv("CHOERODON_BASE_URL", "https://open-gateway.going-link.com")
 CHOERODON_ORG_ID = os.getenv("CHOERODON_ORG_ID", "1")
 CHOERODON_TENANT_ID = os.getenv("CHOERODON_TENANT_ID", "1")
-# 默认项目 ID(搜索/详情默认项目;可用 CHOERODON_PROJECT_ID 覆盖)。
-# 生产项目 58 的 detail 接口实测可用;敏捷项目 738424127719677952 的 detail 解密不兼容。
+# 默认项目 ID(日常故障/数据修复项目)。调用方可显式传 project_id
+# 查询当前账号可访问的任意项目；项目名称/ID 可用 choerodon_list_projects 发现。
 CHOERODON_PROJECT_ID = os.getenv("CHOERODON_PROJECT_ID", "58")
 CHOERODON_USERNAME = os.getenv("CHOERODON_USERNAME", "")
 CHOERODON_PASSWORD = os.getenv("CHOERODON_PASSWORD", "")
@@ -126,6 +126,12 @@ GITLAB_BASE_URL = os.getenv("GITLAB_BASE_URL", "https://code.choerodon.com.cn")
 GITLAB_TOKEN = os.getenv("GITLAB_TOKEN", "")
 GITLAB_USERNAME = os.getenv("GITLAB_USERNAME", "")
 GITLAB_PASSWORD = os.getenv("GITLAB_PASSWORD", "")
+# 当前自托管 GitLab 未启用可靠的项目/代码搜索。默认不向 MCP 客户端暴露
+# gitlab_search_*，避免 Agent 先等待失败再回退本地；精确的分支/目录/文件读取
+# 能力仍可独立使用。平台能力恢复后需显式开启。
+GITLAB_SEARCH_ENABLED = os.getenv("GITLAB_SEARCH_ENABLED", "false").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 # 代码搜索根目录(限定在该 group / 根 project 下,避免全站噪声)
 # 仅传其一:PROJECT_ID 优先;GROUP 用于 /search 范围限定
 GITLAB_SEARCH_ROOT_ID = os.getenv("GITLAB_SEARCH_ROOT_ID", "")
@@ -139,6 +145,109 @@ GITLAB_SEARCH_DEFAULT_SCOPE = os.getenv("GITLAB_SEARCH_DEFAULT_SCOPE", "srm")
 # 需要跨仓检索时,请在 .env 显式配置 PG_ROOT 指向目标仓库目录。
 # ---------------------------------------------------------------------------
 PG_ROOT = os.getenv("PG_ROOT", str(PKG_ROOT))
+
+
+# ---------------------------------------------------------------------------
+# Marmot 纯二开交付目录（只保存路径配置，不创建目录）
+# ---------------------------------------------------------------------------
+def resolve_marmot_delivery_root(value: str | None = None) -> dict[str, object]:
+    """解析并校验纯二开需求产物根目录。
+
+    ``value`` 主要供测试使用；生产调用不传值，直接读取
+    ``MARMOT_DELIVERY_ROOT``。目录可以尚未创建，但最近的已存在父目录必须可写。
+    本函数只读文件系统，不会创建或修改任何目录。
+    """
+    raw = os.getenv("MARMOT_DELIVERY_ROOT", "") if value is None else value
+    raw = (raw or "").strip()
+    if not raw:
+        return {
+            "source": "MARMOT_DELIVERY_ROOT",
+            "configured": False,
+            "valid": False,
+            "output_root": None,
+            "exists": False,
+            "writable": False,
+            "message": "未配置 MARMOT_DELIVERY_ROOT。请在 MCP 的 .env 中设置纯二开产物根目录。",
+        }
+
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        return {
+            "source": "MARMOT_DELIVERY_ROOT",
+            "configured": True,
+            "valid": False,
+            "output_root": None,
+            "exists": False,
+            "writable": False,
+            "message": "MARMOT_DELIVERY_ROOT 必须是绝对路径（可以使用 ~/...）。",
+        }
+
+    output_root = candidate.resolve(strict=False)
+    exists = output_root.exists()
+    is_directory = output_root.is_dir() if exists else False
+    if exists and not is_directory:
+        return {
+            "source": "MARMOT_DELIVERY_ROOT",
+            "configured": True,
+            "valid": False,
+            "output_root": str(output_root),
+            "exists": True,
+            "is_directory": False,
+            "writable": False,
+            "message": "MARMOT_DELIVERY_ROOT 指向已有文件，必须改为目录路径。",
+        }
+
+    writable_probe = output_root
+    while not writable_probe.exists() and writable_probe.parent != writable_probe:
+        writable_probe = writable_probe.parent
+    writable = writable_probe.is_dir() and os.access(writable_probe, os.W_OK)
+    valid = bool(writable)
+    return {
+        "source": "MARMOT_DELIVERY_ROOT",
+        "configured": True,
+        "valid": valid,
+        "output_root": str(output_root),
+        "exists": exists,
+        "is_directory": is_directory,
+        "writable": writable,
+        "message": (
+            "配置有效。" if valid else "目录及其最近的已存在父目录均不可写，请调整路径或权限。"
+        ),
+    }
+
+# ---------------------------------------------------------------------------
+# 适配器脚本读取（数据库保存 Base64(UTF-16BE)，MCP 边界内统一解码）
+# ---------------------------------------------------------------------------
+try:
+    ADAPTER_SCRIPT_CACHE_MAX_ENTRIES = max(
+        1, int(os.getenv("ADAPTER_SCRIPT_CACHE_MAX_ENTRIES", "256"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_CACHE_MAX_ENTRIES = 256
+try:
+    ADAPTER_SCRIPT_CACHE_TTL_SECONDS = max(
+        1, int(os.getenv("ADAPTER_SCRIPT_CACHE_TTL_SECONDS", "60"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_CACHE_TTL_SECONDS = 60
+try:
+    ADAPTER_SCRIPT_DEFAULT_LINES = max(
+        1, int(os.getenv("ADAPTER_SCRIPT_DEFAULT_LINES", "200"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_DEFAULT_LINES = 200
+try:
+    ADAPTER_SCRIPT_MAX_RANGE_LINES = max(
+        1, int(os.getenv("ADAPTER_SCRIPT_MAX_RANGE_LINES", "500"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_MAX_RANGE_LINES = 500
+try:
+    ADAPTER_SCRIPT_MAX_RANGE_CHARS = max(
+        1000, int(os.getenv("ADAPTER_SCRIPT_MAX_RANGE_CHARS", "200000"))
+    )
+except ValueError:
+    ADAPTER_SCRIPT_MAX_RANGE_CHARS = 200000
 
 # ---------------------------------------------------------------------------
 # 正式环境 ES(只读查询,整合自 es-prod;供 es_search / es_count / es_get 使用)
@@ -207,18 +316,32 @@ TABLE_RELATION_TABLE = os.getenv("TABLE_RELATION_TABLE", "table_relations")
 
 
 # ---------------------------------------------------------------------------
-# 统一 Embedding(NVIDIA 免费模型,2048 维;未配置 key 时检索降级为关键词)
+# 语义向量（Cloudflare Workers AI @cf/qwen/qwen3-embedding-0.6b）
+#
+# 免费层每天 10,000 Neurons，对本知识库规模足够；模型输出 1024 维，
+# embedding 列为 vector(1024)。未配置 key 时检索自动降级为关键词。
+#
+# 历史说明：早期支持 NVIDIA / Voyage 双 provider 并预留 embedding_voyage 双列做 A/B，
+# 向量列一度为 vector(2048)。因 nv-embed-v1 下线、Voyage 免费额度限速（3 RPM），
+# 现整体切到 Cloudflare Workers AI，向量统一写单列 embedding（vector(1024)）。
 # ---------------------------------------------------------------------------
-def get_nvidia_api_key() -> str:
-    return os.getenv("NVIDIA_API_KEY", "").strip() or os.getenv("EMBEDDING_API_KEY", "").strip()
+def get_cf_api_token() -> str:
+    return os.getenv("CF_API_TOKEN", "").strip()
 
 
-def get_nvidia_embed_model() -> str:
-    return os.getenv("NVIDIA_EMBED_MODEL", "nvidia/nv-embed-v1").strip()
+def get_cf_account_id() -> str:
+    return os.getenv("CF_ACCOUNT_ID", "").strip()
 
 
-def get_nvidia_embed_url() -> str:
-    return os.getenv("NVIDIA_EMBED_URL", "https://integrate.api.nvidia.com/v1/embeddings").strip()
+def get_cf_embed_model() -> str:
+    return os.getenv("CF_EMBED_MODEL", "@cf/qwen/qwen3-embedding-0.6b").strip()
+
+
+def get_cf_embed_dimension() -> int:
+    try:
+        return int(os.getenv("CF_EMBEDDING_DIMENSION", "1024"))
+    except ValueError:
+        return 1024
 
 
 def get_semantic_match_threshold() -> float:

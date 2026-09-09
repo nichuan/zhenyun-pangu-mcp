@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -55,6 +56,11 @@ def _load_cached_cookie() -> dict:
     """从本地缓存文件读取持久化的登录态 {platform: {cookie, expiry}}。"""
     try:
         if _COOKIE_CACHE.exists():
+            # 兼容旧版本留下的宽权限缓存；读取时顺便收紧权限。
+            try:
+                os.chmod(_COOKIE_CACHE, 0o600)
+            except OSError:
+                pass
             return json.loads(_COOKIE_CACHE.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         pass
@@ -63,11 +69,25 @@ def _load_cached_cookie() -> dict:
 
 def _save_cached_cookie(data: dict) -> None:
     """把登录态写回本地缓存文件，供下次进程复用。"""
+    temp_name: str | None = None
     try:
         _COOKIE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        _COOKIE_CACHE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{_COOKIE_CACHE.name}.", dir=str(_COOKIE_CACHE.parent)
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.chmod(temp_name, 0o600)
+            f.write(json.dumps(data, ensure_ascii=False))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_name, _COOKIE_CACHE)
+        os.chmod(_COOKIE_CACHE, 0o600)
     except OSError:
-        pass
+        if temp_name:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
 
 
 class GrafanaClient:

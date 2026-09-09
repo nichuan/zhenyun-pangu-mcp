@@ -121,6 +121,18 @@ def test_time_bounds_absolute_and_explicit():
     assert end == 2000 and start == 2000 - 7200
 
 
+def test_time_bounds_rejects_invalid_or_oversized_windows():
+    with pytest.raises(ValueError, match="必须晚于"):
+        server._validate_time_bounds(2000, 1000)
+    with pytest.raises(ValueError, match="最多支持 31 天"):
+        server._validate_time_bounds(0, server.MAX_LOG_QUERY_SPAN + 1)
+
+
+def test_time_bounds_rejects_malformed_absolute_range():
+    with pytest.raises(ValueError, match="绝对时间格式错误"):
+        server._time_bounds(None, None, "2026-08-01 00:00~2026-08-01 01:00~extra")
+
+
 # ---------------------------------------------------------------------------
 # obs_sls_query：0 命中自动扩窗（mock 凭据与 SLS HTTP）
 # ---------------------------------------------------------------------------
