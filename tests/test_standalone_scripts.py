@@ -1,6 +1,5 @@
 """Standalone (Marmot) script decoding, cache, range, search, and tool exposure tests."""
 import base64
-import json
 import os
 import sys
 
@@ -161,9 +160,6 @@ def test_standalone_script_tools_are_exposed():
     assert "get_adapter_script_source" in tools
 
 
-def test_tool_error_shape_is_standardized():
-    result = json.loads(server.search_standalone_scripts())
-
-    assert result["ok"] is False
-    assert result["error"]["code"] == "standalone_script"
-    assert result["error"]["retryable"] is False
+def test_tool_rejects_empty_search_before_backend_access():
+    with pytest.raises(ValueError, match="tenant、query"):
+        server.search_standalone_scripts()

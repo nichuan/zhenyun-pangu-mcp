@@ -76,7 +76,7 @@ def test_md_to_html_table():
     html = choerodon._to_html_comment(
         "| 字段 | 值 |\n| :--- | ---: |\n| 状态 | **正常** |"
     )
-    assert "<table>" in html
+    assert '<table border="1"' in html
     assert "<thead>" in html and "<tbody>" in html
     assert '<th align="left">字段</th>' in html
     assert '<th align="right">值</th>' in html

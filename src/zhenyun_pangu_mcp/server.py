@@ -20,9 +20,11 @@ import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 import requests
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import Settings as FastMCPSettings
 
 from . import adapter_scripts, archery, choerodon, es, loki, search, sls, sls_config, gitlab, standalone_scripts
 from .config import (
@@ -34,9 +36,33 @@ from .config import (
 )
 from .knowledge_base import service as kb
 
+# MCP 1.29 + Pydantic Settings 2.15 leaves the generic lifespan annotation
+# unresolved until an explicit rebuild.  Resolve it before constructing FastMCP
+# so schema/setting validation is complete and startup stays warning-free.
+FastMCPSettings.model_rebuild()
 mcp = FastMCP("zhenyun-pangu-mcp")
 BJ = timezone(timedelta(hours=8))
 MAX_LOG_QUERY_SPAN = 31 * 24 * 3600
+
+
+def _advertise_nonempty_any_of(tool_name: str, *fields: str) -> None:
+    """Add a cross-field requirement to the generated MCP input schema.
+
+    FastMCP derives a flat schema from the Python signature and cannot infer rules
+    such as "tenant, service, or query must be provided".  Keep the convenient
+    flat API, but publish the real constraint so clients can validate before a
+    tool call.  The tool function still validates the same rule defensively.
+    """
+    parameters = mcp._tool_manager._tools[tool_name].parameters
+    parameters.setdefault("allOf", []).append({
+        "anyOf": [
+            {
+                "required": [field],
+                "properties": {field: {"type": "string", "minLength": 1}},
+            }
+            for field in fields
+        ]
+    })
 
 
 def _json(value: object) -> str:
@@ -560,14 +586,27 @@ def archery_list_databases(
 
 
 @mcp.tool()
-def archery_list_instances() -> str:
+def archery_list_instances(site: Literal["", "cn", "aws"] = "") -> str:
     """列出 Archery 实例别名映射（短名 -> 真实实例名，按站点分组）。
 
-    返回结构明确标注每个别名归属的 site（cn/aws），调用方据此显式传 site，
-    避免「用 cn 站点查 aws 实例」导致的「未关联该实例」歧义错误。
+    ``site`` 为空时返回全部站点；传 ``cn`` 或 ``aws`` 时只返回该站点。
+    返回结构明确标注每个别名归属的 site，调用方据此在后续查询中显式传
+    site，避免「用 cn 站点查 aws 实例」导致的「未关联该实例」歧义错误。
     """
+    selected = site.strip().lower()
+    if selected and selected not in ARCHERY_INSTANCE_ALIASES:
+        return _err(
+            "archery_instance_site",
+            f"未知 Archery 站点: {site}（可选 cn/aws，留空返回全部）",
+            retryable=False,
+        )
+    instances = (
+        {selected: ARCHERY_INSTANCE_ALIASES[selected]}
+        if selected else ARCHERY_INSTANCE_ALIASES
+    )
     return _ok({
-        "instances_by_site": ARCHERY_INSTANCE_ALIASES,
+        "instances_by_site": instances,
+        "requested_site": selected or None,
         "default_site": "cn",
         "default_db": ARCHERY_DEFAULT_DB,
         "note": "查询实例时须同时传对应 site（如 aws 实例传 site=\"aws\"），"
@@ -749,6 +788,8 @@ def search_adapter_scripts(
     ``query`` 匹配 task_code/description。命中 ``script_id`` 后先按需调用
     search_adapter_script_source，再局部读取 get_adapter_script_source。
     """
+    if not any(value.strip() for value in (tenant, running_service, query)):
+        raise ValueError("tenant、running_service、query 至少提供一项非空值")
     try:
         data = adapter_scripts.service.search_scripts(
             tenant=tenant,
@@ -765,6 +806,11 @@ def search_adapter_scripts(
         return _err("adapter_script_query", str(e), retryable=True)
     except adapter_scripts.AdapterScriptError as e:
         return _err("adapter_script", str(e), retryable=False)
+
+
+_advertise_nonempty_any_of(
+    "search_adapter_scripts", "tenant", "running_service", "query"
+)
 
 
 @mcp.tool()
@@ -879,6 +925,8 @@ def search_standalone_scripts(
     tenant/query 至少提供一项；``query`` 匹配脚本编码/描述。命中 ``script_id``
     后按需调用 search_standalone_script_source，再局部读取 get_standalone_script_source。
     """
+    if not any(value.strip() for value in (tenant, query)):
+        raise ValueError("tenant、query 至少提供一项非空值")
     try:
         data = standalone_scripts.service.search_scripts(
             tenant=tenant,
@@ -893,6 +941,9 @@ def search_standalone_scripts(
         return _err("standalone_script_query", str(e), retryable=True)
     except standalone_scripts.AdapterScriptError as e:
         return _err("standalone_script", str(e), retryable=False)
+
+
+_advertise_nonempty_any_of("search_standalone_scripts", "tenant", "query")
 
 
 @mcp.tool()
@@ -1642,7 +1693,14 @@ def upsert_table_knowledge(
     ``tags`` 传逗号分隔值。这里只写 table_catalog 元数据，不替代实时 DDL，
     不修改业务表。
     """
+    if not any(value.strip() for value in (description, tags, db_name)):
+        raise ValueError("description、tags、db_name 至少提供一项非空值")
     return kb.upsert_table_knowledge(table_name, description, tags, db_name)
+
+
+_advertise_nonempty_any_of(
+    "upsert_table_knowledge", "description", "tags", "db_name"
+)
 
 
 # ============================================================================

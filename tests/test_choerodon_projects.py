@@ -124,13 +124,16 @@ def test_unknown_assignee_or_status_does_not_return_unfiltered_tasks():
 
 def test_project_tool_is_registered_and_returns_standard_envelope():
     assert "choerodon_list_projects" in server.mcp._tool_manager._tools
-    with mock.patch.object(
-        choerodon,
-        "list_projects",
-        return_value={"total": 1, "items": [{"projectId": "58"}]},
+    fake_list_projects = mock.Mock(
+        return_value={"total": 1, "items": [{"projectId": "58"}]}
+    )
+    with mock.patch.dict(
+        choerodon.CHOERODON_DISPATCH,
+        {"list_projects": fake_list_projects},
     ):
         result = json.loads(server.choerodon_list_projects("58"))
 
+    fake_list_projects.assert_called_once_with(keyword="58", size=100)
     assert result["ok"] is True
     assert result["items"][0]["projectId"] == "58"
     assert result["meta"]["source"] == "choerodon"
