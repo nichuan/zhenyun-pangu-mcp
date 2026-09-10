@@ -189,7 +189,8 @@ def search_templates_keyword(
 
 def search_templates_semantic(
     query: str, category: str | None = None, system: str | None = None,
-    verified_only: bool = False, threshold: float | None = None, limit: int = 10,
+    business_domain: str | None = None, verified_only: bool = False,
+    threshold: float | None = None, limit: int = 10,
 ) -> list[dict[str, Any]]:
     if not sb.embedding.available:
         return []
@@ -199,7 +200,7 @@ def search_templates_semantic(
             "query_embedding": sb.embedding.to_literal(q_emb),
             "match_threshold": threshold if threshold is not None else sb.config.get_semantic_match_threshold(),
             "match_count": limit, "p_category": category, "p_system": system,
-            "p_verified_only": verified_only,
+            "p_business_domain": business_domain, "p_verified_only": verified_only,
         })
     except Exception as e:  # noqa: BLE001
         logger.warning("语义检索模板失败：%s", e)

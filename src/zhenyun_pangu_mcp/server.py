@@ -1477,6 +1477,15 @@ def save_sql_template(
     source_type: str = "generated",
     parameters: str = "",
     execution_policy: str = "",
+    execution_flow: str = "",
+    example_case: str = "",
+    problem_description: str = "",
+    symptom: str = "",
+    root_cause: str = "",
+    preconditions: str = "",
+    diagnosis_steps: str = "",
+    verify_sql: str = "",
+    rollback_sql: str = "",
     created_by: str = "",
     skip_dup_check: bool = False,
 ) -> str:
@@ -1486,13 +1495,17 @@ def save_sql_template(
     不执行 ``sql_text``。``keywords``/``core_tables`` 传逗号分隔值，
     ``parameters`` 必须是 JSON 对象字符串（例如
     ``{"tenant_id":{"type":"bigint","required":true}}``）。
-    ``status`` 可用 draft/verified/trusted/deprecated，``risk_level`` 可用
+    数据修复模板应通过 ``execution_flow`` 保存步骤，通过 ``example_case``
+    保存脱敏执行案例；问题描述、症状、根因、前置条件、诊断步骤及校验/回滚
+    SQL 可分别写入对应字段。``status`` 可用 draft/verified/trusted/deprecated，``risk_level`` 可用
     LOW/MEDIUM/HIGH/CRITICAL；未核验模板保持 draft。
     """
     return kb.save_sql_template(
         title, category, scenario, sql_text, keywords, core_tables, verified, template_no,
         system, status, risk_level, business_domain, source_type, parameters,
-        execution_policy, created_by, skip_dup_check,
+        execution_policy, execution_flow, example_case, problem_description,
+        symptom, root_cause, preconditions, diagnosis_steps, verify_sql,
+        rollback_sql, created_by, skip_dup_check,
     )
 
 
@@ -1525,22 +1538,35 @@ def update_sql_template(
     business_domain: str = "",
     keywords: str = "",
     core_tables: str = "",
+    template_no: str = "",
     parameters: str = "",
     execution_policy: str = "",
+    execution_flow: str = "",
+    example_case: str = "",
+    problem_description: str = "",
+    symptom: str = "",
+    root_cause: str = "",
+    preconditions: str = "",
+    diagnosis_steps: str = "",
+    verify_sql: str = "",
+    rollback_sql: str = "",
     source_type: str = "",
     verified: bool = False,
 ) -> str:
     """部分更新已有模板（写操作，需用户确认）。
 
     先用 get_sql_template 确认 ``template_id``；只传需要修改的字段。适合
-    修正 SQL/分类/风险、补充参数或把已核验模板标为 verified。``parameters``
-    仍须为 JSON 对象字符串；``verified=true`` 会将状态提升为 verified。
+    修正 SQL/分类/风险、补充参数、执行流程、脱敏案例、诊断字段或把已核验
+    模板标为 verified。``parameters`` 仍须为 JSON 对象字符串；
+    ``verified=true`` 会将状态提升为 verified。
     不会执行模板 SQL。
     """
     return kb.update_sql_template(
         template_id, title, scenario, sql_text, category, system, status, risk_level,
-        business_domain, keywords, core_tables, parameters, execution_policy,
-        source_type, verified,
+        business_domain, keywords, core_tables, template_no, parameters,
+        execution_policy, execution_flow, example_case, problem_description,
+        symptom, root_cause, preconditions, diagnosis_steps, verify_sql,
+        rollback_sql, source_type, verified,
     )
 
 

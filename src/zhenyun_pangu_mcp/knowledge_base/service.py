@@ -64,17 +64,49 @@ def fmt_knowledge(r: dict[str, Any], similarity: float | None = None) -> str:
     )
 
 
-def fmt_template(r: dict[str, Any], similarity: float | None = None) -> str:
+def fmt_template(
+    r: dict[str, Any], similarity: float | None = None, *, detailed: bool = False,
+) -> str:
     status = r.get("status") or "draft"
     risk = r.get("risk_level") or "LOW"
     sim = f"- **语义相似度**：{similarity:.2f}\n" if similarity is not None else ""
+    details = ""
+    if detailed:
+        detail_lines = []
+        for field, label in (
+            ("problem_description", "问题描述"),
+            ("symptom", "问题现象"),
+            ("root_cause", "根因"),
+            ("preconditions", "前置条件"),
+            ("diagnosis_steps", "诊断步骤"),
+        ):
+            if r.get(field):
+                detail_lines.append(f"- **{label}**：{r[field]}\n")
+        if r.get("execution_policy"):
+            detail_lines.append(f"- **执行策略**：{r['execution_policy']}\n")
+        if r.get("parameters"):
+            detail_lines.append(
+                "\n#### 参数\n```json\n"
+                + json.dumps(r["parameters"], ensure_ascii=False, indent=2)
+                + "\n```\n"
+            )
+        for field, label, language in (
+            ("execution_flow", "执行流程", "text"),
+            ("example_case", "脱敏案例", "text"),
+            ("verify_sql", "校验 SQL", "sql"),
+            ("rollback_sql", "回滚 SQL", "sql"),
+        ):
+            if r.get(field):
+                detail_lines.append(f"\n#### {label}\n```{language}\n{r[field]}\n```\n")
+        details = "".join(detail_lines)
     return (
         f"### [{r.get('id')}] {r.get('title')}（编号 {r.get('template_no') or '—'}）\n"
         f"- **分类**：{r.get('category')} ｜ **系统**：{r.get('system') or '—'} ｜ **状态**：{_TSTATUS_LABEL.get(status, status)} ｜ **风险**：{risk}\n"
+        f"- **业务域**：{r.get('business_domain') or '—'}\n"
         f"- **业务场景**：{r.get('scenario')}\n"
         f"- **关键词**：{'、'.join(r.get('keywords') or []) or '—'} ｜ **核心表**：{'、'.join(r.get('core_tables') or []) or '—'}\n"
         f"- **来源**：{r.get('source_type') or 'migrated'} ｜ **使用次数**：{r.get('usage_count') or 0}\n"
-        f"{sim}\n```sql\n{r.get('sql_text')}\n```\n"
+        f"{sim}{details}\n```sql\n{r.get('sql_text')}\n```\n"
     )
 
 
@@ -171,9 +203,9 @@ def search_sql_templates(
         keyword_rows = repo.search_templates_keyword(kw, cat, sys_v, dom, verified_only, limit)
         semantic_rows: list[dict[str, Any]] = []
         if use_semantic and kw:
-            semantic_rows = repo.search_templates_semantic(kw, cat, sys_v, verified_only, limit=limit)
-            if dom:
-                semantic_rows = [r for r in semantic_rows if (r.get("business_domain") or "") == dom]
+            semantic_rows = repo.search_templates_semantic(
+                kw, cat, sys_v, dom, verified_only, limit=limit,
+            )
 
         if not kw:
             rows = repo.list_templates(cat, sys_v, dom, verified_only, limit)
@@ -225,7 +257,7 @@ def get_knowledge(doc_id: int) -> str:
 def get_sql_template(template_id: int) -> str:
     try:
         row = repo.get_template(int(template_id))
-        return fmt_template(row) if row else f"⚠️ 未找到 id={template_id} 的模板。"
+        return fmt_template(row, detailed=True) if row else f"⚠️ 未找到 id={template_id} 的模板。"
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -457,6 +489,9 @@ def save_sql_template(
     core_tables: str = "", verified: bool = False, template_no: str = "", system: str = "",
     status: str = "draft", risk_level: str = "LOW", business_domain: str = "",
     source_type: str = "generated", parameters: str = "", execution_policy: str = "",
+    execution_flow: str = "", example_case: str = "", problem_description: str = "",
+    symptom: str = "", root_cause: str = "", preconditions: str = "",
+    diagnosis_steps: str = "", verify_sql: str = "", rollback_sql: str = "",
     created_by: str = "", skip_dup_check: bool = False,
 ) -> str:
     try:
@@ -471,6 +506,15 @@ def save_sql_template(
             "system": system.strip() or None, "status": status, "risk_level": risk_level,
             "business_domain": business_domain.strip() or None,
             "source_type": source_type, "execution_policy": execution_policy.strip() or None,
+            "execution_flow": execution_flow.strip() or None,
+            "example_case": example_case.strip() or None,
+            "problem_description": problem_description.strip() or None,
+            "symptom": symptom.strip() or None,
+            "root_cause": root_cause.strip() or None,
+            "preconditions": preconditions.strip() or None,
+            "diagnosis_steps": diagnosis_steps.strip() or None,
+            "verify_sql": verify_sql.strip() or None,
+            "rollback_sql": rollback_sql.strip() or None,
             "created_by": created_by.strip() or None,
         }
         if parameters.strip():
@@ -484,7 +528,7 @@ def save_sql_template(
             emb = sb.embedding.embed_template(payload)
             payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
         row = repo.insert_template(payload)
-        return f"✅ 模板已沉淀（id={row.get('id')}）。\n\n" + fmt_template(row)
+        return f"✅ 模板已沉淀（id={row.get('id')}）。\n\n" + fmt_template(row, detailed=True)
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -508,7 +552,11 @@ def update_sql_template(
     template_id: int, title: str = "", scenario: str = "", sql_text: str = "",
     category: str = "", system: str = "", status: str = "", risk_level: str = "",
     business_domain: str = "", keywords: str = "", core_tables: str = "",
-    parameters: str = "", execution_policy: str = "", source_type: str = "",
+    template_no: str = "", parameters: str = "", execution_policy: str = "",
+    execution_flow: str = "", example_case: str = "", problem_description: str = "",
+    symptom: str = "", root_cause: str = "", preconditions: str = "",
+    diagnosis_steps: str = "", verify_sql: str = "", rollback_sql: str = "",
+    source_type: str = "",
     verified: bool = False,
 ) -> str:
     """更新已有模板字段（补充验证标记、修正 SQL、调整分类/风险等级等）。"""
@@ -538,8 +586,23 @@ def update_sql_template(
             payload["keywords"] = _split(keywords)
         if core_tables:
             payload["core_tables"] = _split(core_tables)
+        if template_no:
+            payload["template_no"] = template_no.strip()
         if execution_policy:
             payload["execution_policy"] = execution_policy.strip()
+        for field, value in (
+            ("execution_flow", execution_flow),
+            ("example_case", example_case),
+            ("problem_description", problem_description),
+            ("symptom", symptom),
+            ("root_cause", root_cause),
+            ("preconditions", preconditions),
+            ("diagnosis_steps", diagnosis_steps),
+            ("verify_sql", verify_sql),
+            ("rollback_sql", rollback_sql),
+        ):
+            if value:
+                payload[field] = value.strip()
         if source_type:
             payload["source_type"] = source_type
         if parameters.strip():
@@ -555,24 +618,20 @@ def update_sql_template(
         # 修改影响语义向量的字段时，只更新当前 provider 对应的向量列。
         template_vector_fields = {
             "title", "scenario", "sql_text", "category", "system",
-            "business_domain", "keywords", "core_tables",
+            "business_domain", "keywords", "core_tables", "parameters",
+            "execution_policy", "execution_flow", "example_case",
+            "problem_description", "symptom", "root_cause", "preconditions",
+            "diagnosis_steps", "verify_sql", "rollback_sql",
         }
         if sb.embedding.available and template_vector_fields & payload.keys():
             existing = repo.get_template(int(template_id))
             if existing is None:
                 return f"⚠️ 未找到 id={template_id} 的模板，未更新。"
-            merged = {
-                field: payload.get(field) if field in payload else (existing.get(field) or "")
-                for field in (
-                    "title", "category", "system", "scenario", "keywords",
-                    "core_tables", "sql_text", "problem_description", "symptom",
-                    "root_cause", "business_domain",
-                )
-            }
+            merged = {**existing, **payload}
             emb = sb.embedding.embed_template(merged)
             payload[sb.embedding.vector_column] = sb.embedding.to_literal(emb)
         row = repo.update_template(int(template_id), payload)
-        return f"✅ 模板 id={template_id} 已更新。\n\n" + (fmt_template(row) if row else "（无返回行）")
+        return f"✅ 模板 id={template_id} 已更新。\n\n" + (fmt_template(row, detailed=True) if row else "（无返回行）")
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
