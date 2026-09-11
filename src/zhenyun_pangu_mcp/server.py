@@ -26,13 +26,15 @@ import requests
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Settings as FastMCPSettings
 
-from . import adapter_scripts, archery, choerodon, es, loki, search, sls, sls_config, gitlab, standalone_scripts
+from . import (
+    adapter_scripts, archery, choerodon, delivery_quality, es, loki, search,
+    sls, sls_config, gitlab, standalone_scripts,
+)
 from .config import (
     ARCHERY_INSTANCE_ALIASES,
     ARCHERY_DEFAULT_DB,
     GITLAB_SEARCH_ENABLED,
     LOKI_PLATFORMS,
-    resolve_marmot_delivery_root,
 )
 from .knowledge_base import service as kb
 
@@ -78,9 +80,9 @@ def _json(value: object) -> str:
 # 兼容性：保留原有顶层业务字段（results/query/count 等），仅在结构外层补充 ok/meta，
 # 不破坏现有 Skill 对返回的解析。
 _SOURCE_MAP = {
-    "marmot_get_delivery_config": "local-config",
     "obs_log_query": "loki",
     "obs_log_trace": "loki",
+    "query_script_trace": "sls",
     "obs_log_datasources": "loki",
     "obs_sls_query": "sls",
     "obs_sls_targets": "sls",
@@ -90,6 +92,7 @@ _SOURCE_MAP = {
     "archery_query_tenant": "archery",
     "archery_list_databases": "archery",
     "archery_list_instances": "archery",
+    "inspect_object_relation": "archery",
     "search_adapter_scripts": "adapter-script",
     "get_adapter_script_info": "adapter-script",
     "get_adapter_script_source": "adapter-script",
@@ -98,6 +101,7 @@ _SOURCE_MAP = {
     "get_standalone_script_info": "standalone-script",
     "get_standalone_script_source": "standalone-script",
     "search_standalone_script_source": "standalone-script",
+    "check_marmot_script_static": "local-static-check",
     "search_repo": "local-repo",
     "gitlab_search_projects": "gitlab",
     "gitlab_search_code": "gitlab",
@@ -161,31 +165,6 @@ def _ok(data: object, source: str) -> str:
         meta.setdefault("source", source)
         meta.setdefault("observed_at", _now_str())
     return _json(data)
-
-
-# ============================================================================
-# 本地交付配置（只读）
-# ============================================================================
-
-@mcp.tool()
-def marmot_get_delivery_config() -> str:
-    """读取 Marmot 纯二开需求产物根目录配置（只读，不创建目录）。
-
-    配置来自 MCP `.env` 中的 `MARMOT_DELIVERY_ROOT`。返回解析后的绝对路径、
-    是否存在及是否可写，并给出固定的需求级目录约定。Skill 应优先使用用户在
-    当前请求中明确给出的目录，否则调用本工具；配置无效时不得回退到硬编码路径。
-    """
-    data = resolve_marmot_delivery_root()
-    data["layout"] = {
-        "requirement_root": "<output_root>/<issue>/<tenant>",
-        "request": "<output_root>/<issue>/<tenant>/request.md",
-        "artifacts": "<output_root>/<issue>/<tenant>/artifacts.json",
-        "srm-adaptor": "<output_root>/<issue>/<tenant>/srm-adaptor/<code>/entry.js",
-        "SCRIPT_LIB": "<output_root>/<issue>/<tenant>/SCRIPT_LIB/<code>/entry.js",
-        "CodeBlock": "<output_root>/<issue>/<tenant>/CodeBlock/<code>/entry.js",
-        "QueryBlock": "<output_root>/<issue>/<tenant>/QueryBlock/<code>/query.sql",
-    }
-    return _ok(data, "local-config")
 
 
 # ============================================================================
@@ -614,6 +593,102 @@ def archery_list_instances(site: Literal["", "cn", "aws"] = "") -> str:
     }, "archery")
 
 
+_DB_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]*(?:\.[A-Za-z_][A-Za-z0-9_$-]*)?$")
+
+
+def _validate_db_identifier(value: str, label: str) -> str:
+    value = (value or "").strip()
+    if not _DB_IDENTIFIER.fullmatch(value):
+        raise ValueError(f"{label} 不是安全的表名/字段名")
+    return value
+
+
+def _quote_db_identifier(value: str) -> str:
+    return ".".join(f"`{part}`" for part in value.split("."))
+
+
+@mcp.tool()
+def inspect_object_relation(
+    source_object: str,
+    source_field: str,
+    target_object: str,
+    target_field: str,
+    site: str = "cn",
+    instance: str | None = None,
+    db: str | None = None,
+    sample_limit: int = 5,
+) -> str:
+    """核验两个数据库对象的字段、关联条件和少量真实样例（只读）。
+
+    该工具用于需求开发编码前的字段来源分析：先从实时数据库确认两端字段是否
+    存在，再在字段存在时执行一个受限 JOIN 样例。它不会推断不存在的字段；若
+    字段缺失，返回推荐查询和明确的 ``field_exists=false``，供 Skill 停止猜测。
+    """
+    try:
+        source_object = _validate_db_identifier(source_object, "source_object")
+        source_field = _validate_db_identifier(source_field, "source_field")
+        target_object = _validate_db_identifier(target_object, "target_object")
+        target_field = _validate_db_identifier(target_field, "target_field")
+        sample_limit = _bounded_limit(sample_limit, 20)
+        instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
+        db_name = db or ARCHERY_DEFAULT_DB
+        client = archery.ArcheryClient(site)
+        source_columns = client.list_columns(instance_name, db_name, source_object)
+        target_columns = client.list_columns(instance_name, db_name, target_object)
+        source_ddl = client.describe_table(instance_name, db_name, source_object)
+        target_ddl = client.describe_table(instance_name, db_name, target_object)
+        source_exists = source_field.split(".")[-1] in source_columns
+        target_exists = target_field.split(".")[-1] in target_columns
+        source_q = _quote_db_identifier(source_object)
+        target_q = _quote_db_identifier(target_object)
+        source_f = _quote_db_identifier(source_field)
+        target_f = _quote_db_identifier(target_field)
+        recommended_query = (
+            f"SELECT s.{source_f} AS source_value, t.{target_f} AS target_value "
+            f"FROM {source_q} s JOIN {target_q} t "
+            f"ON s.{source_f} = t.{target_f} LIMIT {sample_limit}"
+        )
+        samples = []
+        if source_exists and target_exists:
+            result = client.query(recommended_query, instance_name, db_name, sample_limit)
+            samples = result.get("rows", [])
+        return _ok({
+            "site": site,
+            "instance": instance_name,
+            "db": db_name,
+            "source": {
+                "object": source_object,
+                "field": source_field,
+                "field_exists": source_exists,
+                "columns": source_columns,
+                "ddl": source_ddl.get("create_table", ""),
+            },
+            "target": {
+                "object": target_object,
+                "field": target_field,
+                "field_exists": target_exists,
+                "columns": target_columns,
+                "ddl": target_ddl.get("create_table", ""),
+            },
+            "relation": {
+                "join_condition": f"{source_object}.{source_field} = {target_object}.{target_field}",
+                "sample_count": len(samples),
+                "sample_rows": samples,
+                "verified_by_sample": bool(samples),
+            },
+            "recommended_query": recommended_query,
+            "next_step": (
+                "字段和 JOIN 样例已通过实时数据库核验，可写入字段来源表。"
+                if samples else
+                "两端字段存在，但当前样例查询未命中，关联关系仍需结合业务条件核实。"
+                if source_exists and target_exists else
+                "至少一个字段不存在，停止从对象中直接取值；请重新确认对象、字段或关联路径。"
+            ),
+        }, "archery")
+    except (ValueError, archery.ArcheryError) as e:
+        return _err("object_relation", str(e), retryable=isinstance(e, archery.ArcheryError))
+
+
 # ============================================================================
 # choerodon_* 猪齿鱼工具（内置 Python 客户端,无外部脚本依赖）
 # ============================================================================
@@ -1037,6 +1112,33 @@ def search_standalone_script_source(
         return _err("standalone_script", str(e), retryable=False)
 
 
+@mcp.tool()
+def check_marmot_script_static(
+    source: str,
+    script_code: str = "",
+    rules_json: str = "",
+    expected_sha256: str = "",
+    artifact_sha256: str = "",
+) -> str:
+    """对 Marmot JavaScript 做本地静态门禁检查（不执行脚本）。
+
+    固定检查单一 process 入口和运行时禁用项；需求特有的数字 ID、禁止直取字段、
+    外部服务参数、对象结构、常量、日志阶段和全量分页规则通过 ``rules_json`` 传入。
+    MCP 不内置任何租户、表、字段、状态或服务规则。
+    """
+    try:
+        result = delivery_quality.static_check_script(
+            source,
+            script_code=script_code,
+            rules_json=rules_json,
+            expected_sha256=expected_sha256,
+            artifact_sha256=artifact_sha256,
+        )
+        return _ok(result, "local-static-check")
+    except Exception as e:  # 防止单个源码样本让 MCP 进程退出
+        return _err("static_check", str(e), retryable=False)
+
+
 # ============================================================================
 # gitlab_* 代码平台（GitLab 仓库：项目/代码/文件/目录/分支，整合自 gitlab-code-mcp）
 # ============================================================================
@@ -1285,6 +1387,108 @@ def obs_sls_query(
         }, "sls")
     except (ValueError, RuntimeError) as e:
         return _err("sls_query", str(e), retryable=True)
+
+
+_SCRIPT_TRACE_STAGE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "process_start": (r"process\s*start", r"脚本入口", r"入口日志"),
+    "data_access": (r"data\s*(?:query|access)", r"查询对象", r"数据查询", r"返回数量"),
+    "association": (r"association", r"relation", r"关联补全", r"未匹配", r"unmatched"),
+    "request_build": (r"request\s*(?:built|variables|parameters)", r"请求变量", r"参数数量", r"variables_count"),
+    "external_response": (r"service response", r"external response", r"外部服务响应", r"顶层失败"),
+    "mapping": (r"record mapping", r"line mapping", r"字段映射", r"行映射", r"最终字段"),
+    "persistence": (r"persist", r"persistence", r"持久化", r"更新行数"),
+    "branch_result": (r"branch", r"分支结果", r"读取已有结果", r"跳过"),
+}
+
+
+def _classify_script_trace_stage(content: str) -> str:
+    for stage, patterns in _SCRIPT_TRACE_STAGE_PATTERNS.items():
+        if any(re.search(pattern, content, re.IGNORECASE) for pattern in patterns):
+            return stage
+    return "other"
+
+
+def _extract_log_count(content: str) -> int | None:
+    match = re.search(r"(?:count|数量|返回数量|更新行数|成功数量|失败数量)\s*[:=：]\s*(\d+)", content, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+@mcp.tool()
+def query_script_trace(
+    trace_id: str,
+    from_time: int = 0,
+    to_time: int = 0,
+    script_code: str = "",
+    container_name: str = "srm-script-container",
+    environment: str = "prod",
+    system: str = "盘古",
+    limit: int = 200,
+    include_raw: bool = False,
+) -> str:
+    """按 traceId 查询脚本容器日志并整理成阶段时间线（国内 SLS）。
+
+    from_time/to_time 是强制时间边界；只传 traceId 时返回参数错误，不把“没有
+    日志”误报成结论。默认限定 ``_container_name_: srm-script-container``，可再按
+    script_code 缩小范围。默认只返回裁剪后的消息、阶段和数量，真实完整报文仅在
+    联调开关 ``include_raw=true`` 时返回。
+    """
+    if not trace_id.strip():
+        return _err("bad_param", "trace_id 不能为空", retryable=False)
+    if not from_time or not to_time:
+        return _err("time_required", "query_script_trace 必须同时提供 from_time 和 to_time，不能只传 traceId", retryable=False)
+    try:
+        start, end = _validate_time_bounds(int(from_time), int(to_time))
+        limit = _bounded_limit(limit, 500)
+        container = container_name.strip()
+        if not container or re.search(r"[\"'\n\r]", container):
+            raise ValueError("container_name 不能为空且不能包含引号/换行")
+        target = sls_config.resolve_target(system, environment)
+        ak_id, ak_secret = sls_config.credentials(target)
+        clauses = [f'"{trace_id.replace(chr(34), "")}"', f"_namespace_: {target.namespace}", f"_container_name_: {container}"]
+        if script_code.strip():
+            clauses.append(f'"{script_code.replace(chr(34), "")}"')
+        query = " AND ".join(clauses)
+        logs, progress = sls.query_sls(
+            target.project, target.logstore, ak_id, ak_secret, query,
+            start, end, sls_config.endpoint(), limit,
+        )
+        timeline = []
+        stage_counts: dict[str, int] = {}
+        for log in logs:
+            content = str(log.get("content") or log.get("message") or "")
+            stage = _classify_script_trace_stage(content)
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            item = {
+                "time": log.get("__time__"),
+                "stage": stage,
+                "container": log.get("_container_name_") or container,
+                "script_code_matched": not script_code.strip() or script_code in content,
+                "count": _extract_log_count(content),
+                "message": content[:800],
+            }
+            if include_raw:
+                item["raw"] = log
+            timeline.append(item)
+        return _ok({
+            "trace_id": trace_id,
+            "script_code": script_code or None,
+            "container_name": container,
+            "system": system,
+            "environment": environment,
+            "from_time": start,
+            "to_time": end,
+            "from_time_bj": datetime.fromtimestamp(start, BJ).strftime("%Y-%m-%d %H:%M:%S"),
+            "to_time_bj": datetime.fromtimestamp(end, BJ).strftime("%Y-%m-%d %H:%M:%S"),
+            "query": query,
+            "progress": progress,
+            "count": len(timeline),
+            "stage_counts": stage_counts,
+            "timeline": timeline,
+            "raw_included": include_raw,
+            "hint": "未命中时请先确认 script_code、容器名和 from_time/to_time 是否覆盖真实执行时间。",
+        }, "sls")
+    except (ValueError, RuntimeError) as e:
+        return _err("script_trace", str(e), retryable=isinstance(e, RuntimeError))
 
 
 @mcp.tool()
