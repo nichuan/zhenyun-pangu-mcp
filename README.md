@@ -126,7 +126,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 
 **常用参数提示**：
 
-- `obs_sls_query(environment="prod"|"dev"|"test", trace_id=..., keyword=..., level="ERROR"|"" )`：`trace_id` 走「ERROR/WARN + 全链路」两阶段查询；`keyword` 传 SLS 查询子句（会与 `_namespace_` 过滤组合）。
+- `obs_sls_query(environment="prod"|"dev"|"test", trace_id=..., keyword=..., level="ERROR"|"", container_name=...)`：`trace_id` 走「ERROR/WARN + 全链路」两阶段查询；`keyword` 传 SLS 查询子句（会与 `_namespace_` 过滤组合）；二开排障传 `container_name="srm-script-container"`，把 traceId 或关键字检索限制在脚本容器。
 - 时间：`time_range` 支持 `最近30分钟` / `最近2小时` / `最近3天` / `今天` / `昨天` / `本周` / `上月`，或 `30m` / `2h` / `1d`，或 `YYYY-MM-DD HH:mm~HH:mm`（北京时间）。
 - `auto_expand`（默认 true）：未显式指定时间窗且 0 命中时，自动扩到最近 24h、72h 各重试一次，实际窗口见 `meta.attempted_windows`。
 - 不确定支持哪些环境时，用 `obs_sls_targets()` 列出真实映射；AWS 侧用 `obs_log_datasources(region="aws")` 列出真实数据源名。

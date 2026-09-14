@@ -7,6 +7,7 @@
 - 统一时间解析（中英文相对时间 / 自然语言 / 绝对时间）；
 - obs_sls_query 的 0 命中自动扩窗（mock 掉 SLS HTTP 与凭据）。
 """
+import json
 import os
 import sys
 import time
@@ -174,6 +175,77 @@ def test_obs_sls_query_respects_explicit_window(monkeypatch):
     # 显式时间窗：不扩窗，只查一次
     assert len(calls) == 1
     assert calls[0][1] - calls[0][0] == 3 * 86400
+
+
+def test_obs_sls_query_scopes_script_keyword_to_container(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sls_config, "credentials", lambda target: ("ak-id", "ak-secret"))
+
+    def fake_query_sls(project, logstore, ak_id, ak_secret, query, from_time, to_time, endpoint, line):
+        calls.append(query)
+        return [{"__time__": str(to_time), "content": "script failed"}], "Complete"
+
+    monkeypatch.setattr(sls, "query_sls", fake_query_sls)
+    raw = server.obs_sls_query(
+        environment="test",
+        keyword='"script failed"',
+        level="",
+        container_name="srm-script-container",
+        limit=10,
+    )
+
+    assert '"ok": true' in raw
+    assert calls == [
+        '_namespace_: saas-test-new AND _container_name_: srm-script-container AND "script failed"'
+    ]
+
+
+def test_obs_sls_query_scopes_script_trace_to_container(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sls_config, "credentials", lambda target: ("ak-id", "ak-secret"))
+
+    def fake_query_trace(*args):
+        calls.append(args)
+        return [{"__time__": str(args[7]), "content": "trace hit"}], "Complete"
+
+    monkeypatch.setattr(sls, "query_trace", fake_query_trace)
+    raw = server.obs_sls_query(
+        environment="prod",
+        trace_id="trace-1",
+        container_name="srm-script-container",
+        limit=10,
+    )
+    result = json.loads(raw)
+
+    assert result["ok"] is True
+    assert calls[0][-1] == "srm-script-container"
+    assert result["meta"]["query"] == (
+        '"trace-1" AND _namespace_: saas-prod AND _container_name_: srm-script-container'
+    )
+
+
+def test_sls_trace_applies_container_to_error_and_full_queries(monkeypatch):
+    queries = []
+
+    def fake_query_sls(project, logstore, ak_id, ak_secret, query, from_time, to_time, endpoint, line):
+        queries.append(query)
+        return [], "Complete"
+
+    monkeypatch.setattr(sls, "query_sls", fake_query_sls)
+    sls.query_trace(
+        "project", "logstore", "ak-id", "ak-secret", "trace-1", "saas-test-new",
+        1, 2, "endpoint", 10, "srm-script-container",
+    )
+
+    assert len(queries) == 2
+    assert all("_container_name_: srm-script-container" in query for query in queries)
+
+
+def test_obs_sls_query_rejects_unsafe_container_name():
+    raw = server.obs_sls_query(container_name='srm-script-container" OR *')
+
+    assert '"ok": false' in raw
+    assert "container_name 只能包含" in raw
 
 
 def test_obs_sls_query_unknown_env_returns_error():

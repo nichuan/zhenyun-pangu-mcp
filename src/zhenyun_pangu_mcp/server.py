@@ -1307,6 +1307,7 @@ def obs_sls_query(
     limit: int = 200,
     auto_expand: bool = True,
     clip_len: int = 2000,
+    container_name: str = "",
 ) -> str:
     """查询国内公有云（cn）阿里云 SLS 日志：盘古 prod + 非生产 dev/test 全覆盖。
 
@@ -1321,6 +1322,8 @@ def obs_sls_query(
       - trace_id：按 traceId 做「ERROR/WARN + 全链路」两阶段查询（传了则优先于 keyword）。
       - keyword：SLS 查询子句（与 _namespace_ 过滤 AND 组合），如 'content: "订单不存在"'。
       - level：默认 ERROR；传空字符串表示不过滤级别。
+      - container_name：按容器精确缩小范围；排查独立脚本、适配器脚本或外部接口二开时
+        固定传 ``srm-script-container``，避免扫描其它服务日志。
       - time_range：最近30分钟/最近2小时/最近3天、今天/昨天/前天/本周/上周/本月/上月，
         或 30m/2h/1d，或 "YYYY-MM-DD HH:mm~HH:mm"（北京时间）。
       - auto_expand：未显式指定时间窗且 0 命中时，自动扩到最近 24h、72h 各重试一次，
@@ -1328,6 +1331,9 @@ def obs_sls_query(
       - clip_len：每条日志字段截断长度（默认 2000，0 表示不裁剪）。
     """
     try:
+        container = container_name.strip()
+        if container and not re.fullmatch(r"[A-Za-z0-9._-]+", container):
+            raise ValueError("container_name 只能包含字母、数字、点、下划线和连字符")
         target = sls_config.resolve_target(system, environment)
         ak_id, ak_secret = sls_config.credentials(target)
         limit = _bounded_limit(limit, 500)
@@ -1342,6 +1348,8 @@ def obs_sls_query(
             windows.extend([(end - hours * 3600, end) for hours in _EXPAND_WINDOWS_HOURS])
 
         clauses = [f"_namespace_: {target.namespace}"]
+        if container:
+            clauses.append(f"_container_name_: {container}")
         if level:
             clauses.append(f"level: {level}")
         if keyword:
@@ -1357,9 +1365,11 @@ def obs_sls_query(
                 logs, progress = sls.query_trace(
                     target.project, target.logstore, ak_id, ak_secret,
                     trace_id, target.namespace, window_start, window_end,
-                    sls_config.endpoint(), limit,
+                    sls_config.endpoint(), limit, container,
                 )
                 query_used = f'"{trace_id}" AND _namespace_: {target.namespace}'
+                if container:
+                    query_used += f" AND _container_name_: {container}"
             else:
                 logs, progress = sls.query_sls(
                     target.project, target.logstore, ak_id, ak_secret,
@@ -1375,6 +1385,7 @@ def obs_sls_query(
                 "system": target.system, "environment": target.environment,
                 "project": target.project, "logstore": target.logstore,
                 "namespace": target.namespace,
+                "container_name": container or None,
                 "from_time": used_start, "to_time": used_end,
                 "from_time_bj": datetime.fromtimestamp(used_start, BJ).strftime("%Y-%m-%d %H:%M:%S"),
                 "to_time_bj": datetime.fromtimestamp(used_end, BJ).strftime("%Y-%m-%d %H:%M:%S"),

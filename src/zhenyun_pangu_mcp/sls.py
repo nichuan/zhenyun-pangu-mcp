@@ -1,6 +1,6 @@
 """阿里云 SLS(日志服务)签名查询客户端 —— 纯标准库,零依赖。
 
-用于查询 cn 国内盘古 prod(阿里云日志)的日志;非生产环境日志在 Loki。
+用于查询 cn 国内盘古 prod/dev/test 的阿里云日志；Loki 仅用于 AWS 海外环境。
 官方对接方式:HTTP 请求带 LOG 签名头(x-log-apiversion=0.6.0, hmac-sha1)。
 """
 
@@ -83,9 +83,14 @@ def _key(log: dict) -> tuple:
 
 
 def query_trace(project: str, logstore: str, ak_id: str, ak_secret: str, trace_id: str,
-                namespace: str, from_time: int, to_time: int, endpoint: str, line: int = 200) -> tuple[list[dict], str]:
-    error_query = f'"{trace_id}" AND _namespace_: {namespace} AND (level: ERROR OR level: WARN)'
-    full_query = f'"{trace_id}" AND _namespace_: {namespace}'
+                namespace: str, from_time: int, to_time: int, endpoint: str, line: int = 200,
+                container_name: str = "") -> tuple[list[dict], str]:
+    container_clause = f" AND _container_name_: {container_name}" if container_name else ""
+    error_query = (
+        f'"{trace_id}" AND _namespace_: {namespace}{container_clause} '
+        "AND (level: ERROR OR level: WARN)"
+    )
+    full_query = f'"{trace_id}" AND _namespace_: {namespace}{container_clause}'
     errors, p1 = query_sls(project, logstore, ak_id, ak_secret, error_query, from_time, to_time, endpoint, line)
     full, p2 = query_sls(project, logstore, ak_id, ak_secret, full_query, from_time, to_time, endpoint, line)
     merged, seen = [], set()

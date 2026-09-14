@@ -17,9 +17,11 @@ MARKETPLACE_NAME="$(
 
 for skill_dir in "${WORKSPACE_ROOT}"/custom-skills/*; do
   [[ -d "${skill_dir}" ]] || continue
-  UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}" \
-    uv run --no-project --with pyyaml python \
-    "${SKILL_CREATOR_ROOT}/scripts/quick_validate.py" "${skill_dir}"
+  (
+    cd "${MCP_ROOT}"
+    UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}" uv run python \
+      "${SKILL_CREATOR_ROOT}/scripts/quick_validate.py" "${skill_dir}"
+  )
 done
 
 (
@@ -36,9 +38,11 @@ rsync -a --delete --exclude='.DS_Store' --exclude='.git' --exclude='.env' \
   --exclude='*.pyc' --exclude='dist' --exclude='build' --exclude='.mcp.json' \
   "${MCP_ROOT}/" "${PLUGIN_ROOT}/servers/zhenyun-pangu-mcp/"
 
-UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}" \
-  uv run --no-project --with pyyaml python "${PLUGIN_CREATOR_ROOT}/scripts/validate_plugin.py" \
-  "${PLUGIN_ROOT}"
+(
+  cd "${MCP_ROOT}"
+  UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}" uv run python \
+    "${PLUGIN_CREATOR_ROOT}/scripts/validate_plugin.py" "${PLUGIN_ROOT}"
+)
 UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}" \
   uv run --no-project python "${PLUGIN_CREATOR_ROOT}/scripts/update_plugin_cachebuster.py" \
   "${PLUGIN_ROOT}"
