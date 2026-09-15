@@ -1535,9 +1535,9 @@ def search_knowledge(
 ) -> str:
     """检索业务知识、系统机制和排查经验（只读）。
 
-    何时调用：排障、生成 SQL 或解释字段/状态前，先查是否已有企业认知。
-    ``query`` 为空时按过滤条件列出最近更新的知识；有关键词时默认混合
-    语义向量和关键词检索。``knowledge_type`` 可用 business/system/technical/
+    何时调用：本地精确手册不覆盖、需要跨案例发现时。精确关键词或低延迟
+    场景先传 ``use_semantic=false``；关键词未命中再启用语义检索。
+    ``query`` 为空时按过滤条件列出最近更新的知识。``knowledge_type`` 可用 business/system/technical/
     troubleshooting/data_model/configuration/experience/rule，``status`` 可用
     draft/verified/deprecated/archived；``verified_only=true`` 只返回 verified。
     ``limit`` 最大 50。结果中的 ``id`` 可交给 get_knowledge 获取完整正文。
@@ -1557,8 +1557,9 @@ def search_sql_templates(
 ) -> str:
     """检索可复用的 SQL/修复模板（只读，混合检索）。
 
-    何时调用：生成查询或人工确认修复 SQL 前，先用业务关键词、表名或问题
-    症状检索历史方案；优先筛选 ``verified_only=true``。可用过滤项为
+    何时调用：复杂、重复或数据修复场景需要复用历史方案时。低延迟路径先传
+    ``use_semantic=false`` 和 ``verified_only=true``；关键词未命中且历史方案
+    仍有价值时再启用语义检索。可用过滤项为
     ``category``、``system``、``business_domain``；``keyword`` 为空时用于
     按过滤条件总览模板，``limit`` 最大 50。命中结果的 ``id`` 交给
     get_sql_template；复用完成后再调用 record_template_usage。
@@ -1576,7 +1577,8 @@ def search_tables(
 ) -> str:
     """按关键词/语义检索表目录（只读），返回候选表元数据。
 
-    何时调用：不知道真实表名、需要从业务描述定位表时。``query`` 必填；
+    何时调用：不知道真实表名、需要从业务描述定位表时。已知表名不要调用。
+    精确业务词或低延迟场景可先传 ``use_semantic=false``。``query`` 必填；
     ``domain``/``db_name`` 用于缩小范围，``top_k`` 最大 20。目录结果是
     候选和业务注释，不等同于当前数据库字段事实；字段存在性和完整 DDL
     必须再用 archery_describe_table/archery_list_columns 确认。
@@ -1588,7 +1590,8 @@ def search_tables(
 def search_pangu(query: str, system: str = "", module: str = "", category: str = "", top_k: int = 3) -> str:
     """统一快速发现：一次检索知识、模板、表及候选表关系（只读）。
 
-    适合刚收到一个跨知识/数据域的问题时做第一轮定位；``system``、
+    适合刚收到一个跨知识/数据域的问题时做第一轮定位；内部并行检索三个
+    数据源及候选表关系。``system``、
     ``module``、``category`` 可缩小结果，``top_k`` 最大 5。它是关键词快速
     发现，不替代专项检索或实时 Archery 查询；拿到 id/表名后继续调用
     get_knowledge、get_sql_template、get_table 或 get_table_relations。
@@ -1647,7 +1650,8 @@ def diagnose_context(query: str, system: str = "", module: str = "", limit: int 
     """组合诊断：为一个问题汇集知识 → 模板 → 表 → 关系（只读）。
 
     何时调用：排障或复杂 SQL 任务尚未知道该查哪类资料时，作为第一轮
-    上下文收集器；``system``/``module`` 可过滤知识，``limit`` 最大 5。
+    上下文收集器；内部并行检索知识、模板、表及候选关系。
+    ``system``/``module`` 可过滤知识，``limit`` 最大 5。
     结果用于确定下一步工具，不会查询实时日志/数据库，也不会自动生成或
     执行修复 SQL；随后按结果分别调用专项工具和 Archery。
     """

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,6 +21,34 @@ from .. import supabase_client as sb
 from . import repository as repo
 
 logger = logging.getLogger(__name__)
+
+
+def _run_independent(calls: dict[str, Callable[[], Any]]) -> dict[str, Any]:
+    """并发执行互不依赖的只读请求，减少组合检索的网络等待时间。"""
+    if not calls:
+        return {}
+    if len(calls) == 1:
+        name, call = next(iter(calls.items()))
+        return {name: call()}
+    with ThreadPoolExecutor(
+        max_workers=min(len(calls), 5), thread_name_prefix="pangu-kb",
+    ) as executor:
+        futures = {name: executor.submit(call) for name, call in calls.items()}
+        return {name: future.result() for name, future in futures.items()}
+
+
+def _relations_for_tables(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """批量读取候选表关系；同一张表只查询一次。"""
+    table_names = list(dict.fromkeys(
+        str(row.get("table_name") or "").strip().lower()
+        for row in rows
+        if row.get("table_name")
+    ))
+    relation_groups = _run_independent({
+        table_name: lambda table_name=table_name: repo.get_relations(table_name)
+        for table_name in table_names
+    })
+    return [relation for table_name in table_names for relation in relation_groups[table_name]]
 
 # 知识类型 / 状态标签
 _KTYPE_LABEL = {
@@ -168,14 +198,19 @@ def search_knowledge(
         sys_v = system.strip() or None
         mod = module.strip() or None
 
-        keyword_rows = repo.search_knowledge_keyword(kw, ktype, sys_v, mod, status, limit) if kw else []
-        semantic_rows: list[dict[str, Any]] = []
-        if use_semantic and kw:
-            semantic_rows = repo.search_knowledge_semantic(kw, ktype, sys_v, mod, status, limit=limit)
-
         if not kw:
             rows = repo.list_knowledge(ktype, sys_v, mod, status, limit)
             return f"📚 知识库共 {len(rows)} 条：\n\n" + "\n".join(fmt_knowledge(r) for r in rows) if rows else "📭 知识库为空。"
+        searches = _run_independent({
+            "keyword": lambda: repo.search_knowledge_keyword(kw, ktype, sys_v, mod, status, limit),
+            **({
+                "semantic": lambda: repo.search_knowledge_semantic(
+                    kw, ktype, sys_v, mod, status, limit=limit,
+                ),
+            } if use_semantic else {}),
+        })
+        keyword_rows = searches["keyword"]
+        semantic_rows: list[dict[str, Any]] = searches.get("semantic", [])
         if semantic_rows:
             rows = repo.merge_by_id([r.get("id") for r in semantic_rows], semantic_rows, keyword_rows)[:limit]
             return (
@@ -200,16 +235,21 @@ def search_sql_templates(
         sys_v = system.strip() or None
         dom = business_domain.strip() or None
 
-        keyword_rows = repo.search_templates_keyword(kw, cat, sys_v, dom, verified_only, limit)
-        semantic_rows: list[dict[str, Any]] = []
-        if use_semantic and kw:
-            semantic_rows = repo.search_templates_semantic(
-                kw, cat, sys_v, dom, verified_only, limit=limit,
-            )
-
         if not kw:
             rows = repo.list_templates(cat, sys_v, dom, verified_only, limit)
             return f"📚 模板库共 {len(rows)} 条：\n\n" + "\n".join(fmt_template(r) for r in rows) if rows else "📭 模板库为空。"
+        searches = _run_independent({
+            "keyword": lambda: repo.search_templates_keyword(
+                kw, cat, sys_v, dom, verified_only, limit,
+            ),
+            **({
+                "semantic": lambda: repo.search_templates_semantic(
+                    kw, cat, sys_v, dom, verified_only, limit=limit,
+                ),
+            } if use_semantic else {}),
+        })
+        keyword_rows = searches["keyword"]
+        semantic_rows: list[dict[str, Any]] = searches.get("semantic", [])
         if semantic_rows:
             rows = repo.merge_by_id([r.get("id") for r in semantic_rows], semantic_rows, keyword_rows)[:limit]
             return (
@@ -233,8 +273,14 @@ def search_tables(
         kw = query.strip() or None
         if not kw:
             return "⚠️ 请输入查询关键词。"
-        semantic_rows = repo.search_tables_semantic(kw, dom, db, top_k) if use_semantic else []
-        keyword_rows = repo.search_tables_keyword(kw, dom, db, top_k)
+        searches = _run_independent({
+            "keyword": lambda: repo.search_tables_keyword(kw, dom, db, top_k),
+            **({
+                "semantic": lambda: repo.search_tables_semantic(kw, dom, db, top_k),
+            } if use_semantic else {}),
+        })
+        semantic_rows = searches.get("semantic", [])
+        keyword_rows = searches["keyword"]
         rows = repo.merge_by_id([r.get("table_name") for r in semantic_rows], semantic_rows, keyword_rows)[:top_k]
         if not rows:
             return f"🔍 未检索到匹配表（查询：{kw}）。"
@@ -297,9 +343,14 @@ def search_pangu(
         mod = module.strip() or None
         cat = category.strip() or None
 
-        kw_rows = repo.search_knowledge_keyword(query, None, sys_v, mod, None, top_k)
-        tpl_rows = repo.search_templates_keyword(query, cat, sys_v, None, False, top_k)
-        tbl_rows = repo.search_tables_keyword(query, None, None, top_k)
+        searches = _run_independent({
+            "knowledge": lambda: repo.search_knowledge_keyword(query, None, sys_v, mod, None, top_k),
+            "templates": lambda: repo.search_templates_keyword(query, cat, sys_v, None, False, top_k),
+            "tables": lambda: repo.search_tables_keyword(query, None, None, top_k),
+        })
+        kw_rows = searches["knowledge"]
+        tpl_rows = searches["templates"]
+        tbl_rows = searches["tables"]
 
         parts: list[str] = [f"🔍 统一搜索「{query}」结果：\n"]
         parts.append(f"## 📚 知识（{len(kw_rows)}）")
@@ -312,13 +363,12 @@ def search_pangu(
         # 表关系（基于候选表）
         rel_parts: list[str] = []
         seen_rel: set[tuple] = set()
-        for t in tbl_rows:
-            for rel in repo.get_relations(t.get("table_name") or ""):
-                key = (rel.get("from_table"), rel.get("to_table"))
-                if key in seen_rel:
-                    continue
-                seen_rel.add(key)
-                rel_parts.append(fmt_relation(rel))
+        for rel in _relations_for_tables(tbl_rows):
+            key = (rel.get("from_table"), rel.get("to_table"))
+            if key in seen_rel:
+                continue
+            seen_rel.add(key)
+            rel_parts.append(fmt_relation(rel))
         parts.append(f"\n## 🔗 相关关系（{len(rel_parts)}）")
         parts.append("\n".join(rel_parts) if rel_parts else "  无")
         return "\n".join(parts)
@@ -336,9 +386,14 @@ def diagnose_context(query: str, system: str = "", module: str = "", limit: int 
         sys_v = system.strip() or None
         mod = module.strip() or None
 
-        kw = repo.search_knowledge_keyword(query, None, sys_v, mod, None, limit)
-        tpl = repo.search_templates_keyword(query, None, sys_v, None, False, limit)
-        tbl = repo.search_tables_keyword(query, None, None, limit)
+        searches = _run_independent({
+            "knowledge": lambda: repo.search_knowledge_keyword(query, None, sys_v, mod, None, limit),
+            "templates": lambda: repo.search_templates_keyword(query, None, sys_v, None, False, limit),
+            "tables": lambda: repo.search_tables_keyword(query, None, None, limit),
+        })
+        kw = searches["knowledge"]
+        tpl = searches["templates"]
+        tbl = searches["tables"]
 
         parts: list[str] = [f"🧭 诊断上下文「{query}」：\n"]
         parts.append("## ① 认知（知识库建议怎么想）")
@@ -356,15 +411,14 @@ def diagnose_context(query: str, system: str = "", module: str = "", limit: int 
 
         rel_parts: list[str] = []
         seen: set[tuple] = set()
-        for t in tbl:
-            for rel in repo.get_relations(t.get("table_name") or ""):
-                key = (rel.get("from_table"), rel.get("to_table"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                rel_parts.append(
-                    f"- `{rel.get('from_table')}` → `{rel.get('to_table')}` [{rel.get('relation_type')}] {rel.get('description') or ''}"
-                )
+        for rel in _relations_for_tables(tbl):
+            key = (rel.get("from_table"), rel.get("to_table"))
+            if key in seen:
+                continue
+            seen.add(key)
+            rel_parts.append(
+                f"- `{rel.get('from_table')}` → `{rel.get('to_table')}` [{rel.get('relation_type')}] {rel.get('description') or ''}"
+            )
         parts.append("\n## ④ 关系（表之间怎么关联）")
         parts.append("\n".join(rel_parts) if rel_parts else "  无已沉淀关系。")
         return "\n".join(parts)
