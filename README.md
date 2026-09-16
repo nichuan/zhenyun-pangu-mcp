@@ -28,6 +28,8 @@
 
 甄云盘古通用工具 MCP，供任意 MCP 客户端（Claude Desktop / Cursor / 各类 agent）复用。
 
+跨 agent 接入、通用导出命令和本轮协作优化见 [WORKFLOW_OPTIMIZATION.md](WORKFLOW_OPTIMIZATION.md)。
+
 猪齿鱼评论格式说明：`choerodon_add_comment` 接收规范 Markdown，但接口写入的
 `commentText` 是统一渲染后的 HTML 富文本。Markdown 表格会转换为 `<table>`，代码块
 会转换为 `<pre><code class="language-xxx">`；因此从评论区复制代码时不会带回 Markdown
@@ -38,10 +40,11 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 
 ## 能力总览
 
-工具按前缀/能力分组（默认共 57 个；GitLab 搜索开启后增加 2 个）：
+工具按前缀/能力分组（默认共 60 个；GitLab 搜索开启后增加 2 个；实时清单可用 `get_workflow_guide(topic="capabilities")` 查看）：
 
 | 前缀 | 工具 | 说明 |
 |------|------|------|
+| 协作协议 | `get_workflow_guide` | 需求/排障/修复/知识/证据交接的按需指引；本地读取，零业务调用，适用于未加载技能的 MCP 客户端 |
 | `knowledge`（认知层） | `search_knowledge` / `get_knowledge` | 业务知识/排查经验：混合检索（语义+关键词）+ 详情（沉淀于 knowledge_docs） |
 | `template`（行动层） | `search_sql_templates` / `get_sql_template` / `list_sql_templates` | 可复用 SQL/修复模板：混合检索 + 详情 + 总览（沉淀于 sql_templates） |
 | `table`（事实层） | `search_tables` / `get_table` / `get_table_relations` | 表目录 + 关联关系（沉淀于 table_catalog / table_relations） |

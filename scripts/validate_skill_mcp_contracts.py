@@ -29,6 +29,13 @@ def main() -> int:
     from zhenyun_pangu_mcp import server  # noqa: PLC0415
 
     errors = 0
+    # The MCP package is the source of truth; the skill copy ships to clients
+    # that can read files but cannot invoke MCP resources/prompts.
+    guide_source = MCP_ROOT / "src/zhenyun_pangu_mcp/workflow_guide.md"
+    guide_copy = SKILLS_ROOT / "zhenyun-ops/references/collaboration-contract.md"
+    if not guide_copy.exists() or guide_copy.read_bytes() != guide_source.read_bytes():
+        fail("workflow guide drift: copy packaged workflow_guide.md to zhenyun-ops/references/collaboration-contract.md")
+        errors += 1
     declared_tools: set[str] = set()
     skill_names: set[str] = set()
     skill_tool_counts: dict[str, int] = {}
@@ -66,6 +73,15 @@ def main() -> int:
             fail(f"duplicate skill name: {expected_name}")
             errors += 1
         skill_names.add(expected_name)
+
+        # Catch broken local references before distributing to another agent.
+        for target in re.findall(r"\]\(([^)]+)\)", skill_md.read_text(encoding="utf-8")):
+            if "://" in target or target.startswith("#"):
+                continue
+            relative = target.split("#", 1)[0]
+            if relative and not (skill_dir / relative).exists():
+                fail(f"{expected_name}: missing local reference: {relative}")
+                errors += 1
 
         servers = manifest.get("mcp_servers")
         if not isinstance(servers, list):
@@ -111,6 +127,10 @@ def main() -> int:
         errors += 1
 
     runtime_tools = set(server.mcp._tool_manager._tools)
+    for name, tool in server.mcp._tool_manager._tools.items():
+        if tool.annotations is None or tool.annotations.readOnlyHint is None:
+            fail(f"{name}: missing explicit MCP side-effect annotations")
+            errors += 1
     missing_tools = sorted(declared_tools - runtime_tools)
     orphan_tools = sorted(runtime_tools - declared_tools)
     if missing_tools:

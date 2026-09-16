@@ -11,8 +11,8 @@
   - gitlab_*    已知 GitLab 项目/分支/路径的精确读取（搜索默认禁用）
   - search/get/save_* 认知层知识、SQL 模板、表目录和关联关系检索/维护
 
-工具选择原则：先用认知层工具发现稳定规则、历史方案和候选表，再用日志/Archery/
-GitLab/猪齿鱼获取当前事实；认知层写工具只沉淀用户确认后的元数据，不执行业务写 SQL。
+工具选择原则：按缺失事实选择最短入口；规则/历史方案不明时才查认知层，当前事实由
+日志/Archery/GitLab/猪齿鱼提供。复用同范围有效证据；认知层写工具不执行业务写 SQL。
 """
 from __future__ import annotations
 
@@ -37,12 +37,31 @@ from .config import (
     LOKI_PLATFORMS,
 )
 from .knowledge_base import service as kb
+from . import workflow
+from .tool_policy import tool_annotations
 
 # MCP 1.29 + Pydantic Settings 2.15 leaves the generic lifespan annotation
 # unresolved until an explicit rebuild.  Resolve it before constructing FastMCP
 # so schema/setting validation is complete and startup stays warning-free.
 FastMCPSettings.model_rebuild()
-mcp = FastMCP("zhenyun-pangu-mcp")
+mcp = FastMCP(
+    "zhenyun-pangu-mcp",
+    instructions=(
+        "SRM tools: business DB/ES read-only; knowledge/comment tools have side effects. "
+        "When skills are unavailable or a task crosses workflows, use get_workflow_guide; "
+        "otherwise call the specific tool directly. Reuse scoped evidence, verify live facts, "
+        "and do not treat tool annotations as user authorization."
+    ),
+)
+
+
+def _tool():
+    """Register with an explicit side-effect policy rather than SDK write defaults."""
+    def register(fn):
+        return mcp.tool(annotations=tool_annotations(fn.__name__))(fn)
+    return register
+
+
 BJ = timezone(timedelta(hours=8))
 MAX_LOG_QUERY_SPAN = 31 * 24 * 3600
 
@@ -282,7 +301,7 @@ def _check_loki_region(region: str) -> str | None:
 # obs_* 日志工具
 # ============================================================================
 
-@mcp.tool()
+@_tool()
 def obs_log_query(
     region: str = "aws",
     env: str = "nonprod",
@@ -360,7 +379,7 @@ def obs_log_query(
     }, "loki")
 
 
-@mcp.tool()
+@_tool()
 def obs_log_trace(
     trace_id: str,
     region: str = "aws",
@@ -425,7 +444,7 @@ def obs_log_trace(
     }, "loki")
 
 
-@mcp.tool()
+@_tool()
 def obs_log_datasources(region: str = "aws") -> str:
     """列出指定日志平台的 Loki 数据源（只读，仅 AWS 海外）。
 
@@ -456,7 +475,7 @@ def obs_log_datasources(region: str = "aws") -> str:
 # archery_* 数据库工具
 # ============================================================================
 
-@mcp.tool()
+@_tool()
 def archery_query(
     sql: str,
     site: str = "cn",
@@ -480,7 +499,7 @@ def archery_query(
         return _err("archery_query", str(e), retryable=True)
 
 
-@mcp.tool()
+@_tool()
 def archery_describe_table(
     table: str,
     site: str = "cn",
@@ -502,7 +521,7 @@ def archery_describe_table(
         return _err("archery_query", str(e), retryable=True)
 
 
-@mcp.tool()
+@_tool()
 def archery_list_columns(
     table: str,
     site: str = "cn",
@@ -524,7 +543,7 @@ def archery_list_columns(
         return _err("archery_query", str(e), retryable=True)
 
 
-@mcp.tool()
+@_tool()
 def archery_query_tenant(
     tenant: str = "",
     site: str = "cn",
@@ -546,7 +565,7 @@ def archery_query_tenant(
         return _err("archery_query", str(e), retryable=True)
 
 
-@mcp.tool()
+@_tool()
 def archery_list_databases(
     site: str = "cn",
     instance: str | None = None,
@@ -564,7 +583,7 @@ def archery_list_databases(
         return _err("archery_query", str(e), retryable=True)
 
 
-@mcp.tool()
+@_tool()
 def archery_list_instances(site: Literal["", "cn", "aws"] = "") -> str:
     """列出 Archery 实例别名映射（短名 -> 真实实例名，按站点分组）。
 
@@ -607,7 +626,7 @@ def _quote_db_identifier(value: str) -> str:
     return ".".join(f"`{part}`" for part in value.split("."))
 
 
-@mcp.tool()
+@_tool()
 def inspect_object_relation(
     source_object: str,
     source_field: str,
@@ -708,7 +727,7 @@ def _choerodon_call(dispatch_name: str, **kwargs) -> str:
         return _err("choerodon", f"{type(e).__name__}: {e}", retryable=False)
 
 
-@mcp.tool()
+@_tool()
 def choerodon_list_projects(keyword: str = "", size: int = 100) -> str:
     """列出或搜索当前账号可访问的猪齿鱼项目（只读）。
 
@@ -719,7 +738,7 @@ def choerodon_list_projects(keyword: str = "", size: int = 100) -> str:
     return _choerodon_call("list_projects", keyword=keyword, size=size)
 
 
-@mcp.tool()
+@_tool()
 def choerodon_query_issue(issue_id: str, project_id: str = "") -> str:
     """查询猪齿鱼单个任务/缺陷详情（含附件列表）。
 
@@ -731,7 +750,7 @@ def choerodon_query_issue(issue_id: str, project_id: str = "") -> str:
     return _choerodon_call("query_issue", issue_id=issue_id, project_id=project_id or None)
 
 
-@mcp.tool()
+@_tool()
 def choerodon_list_issue(
     keyword: str = "",
     assignee: str = "",
@@ -751,7 +770,7 @@ def choerodon_list_issue(
     )
 
 
-@mcp.tool()
+@_tool()
 def choerodon_search_users(name: str, size: int = 50, project_id: str = "") -> str:
     """按姓名/登录名搜索猪齿鱼项目成员（只读）。
 
@@ -761,25 +780,25 @@ def choerodon_search_users(name: str, size: int = 50, project_id: str = "") -> s
     return _choerodon_call("search_users", name=name, size=size, project_id=project_id or None)
 
 
-@mcp.tool()
+@_tool()
 def choerodon_get_status_map(project_id: str = "") -> str:
     """获取猪齿鱼项目状态映射（状态名 -> 加密 id），供列表过滤用。"""
     return _choerodon_call("get_status_map", project_id=project_id or None)
 
 
-@mcp.tool()
+@_tool()
 def choerodon_search_tasks_by_person(name: str, size: int = 50, project_id: str = "") -> str:
     """按经办人姓名搜索其负责的猪齿鱼任务（先查成员再按经办人过滤）。"""
     return _choerodon_call("search_tasks_by_person", name=name, size=size, project_id=project_id or None)
 
 
-@mcp.tool()
+@_tool()
 def choerodon_list_attachments(issue_id: str, project_id: str = "") -> str:
     """查看猪齿鱼任务的附件列表（文件名 + URL）。"""
     return _choerodon_call("list_attachments", issue_id=issue_id, project_id=project_id or None)
 
 
-@mcp.tool()
+@_tool()
 def choerodon_download_attachment(file_url: str) -> str:
     """通过猪齿鱼 hfle 接口获取附件签名下载地址（只读）。
 
@@ -790,7 +809,7 @@ def choerodon_download_attachment(file_url: str) -> str:
     return _choerodon_call("download_attachment", file_url=file_url)
 
 
-@mcp.tool()
+@_tool()
 def choerodon_list_comments(issue_id: str, size: int = 100, project_id: str = "") -> str:
     """查询猪齿鱼任务的评论列表（只读）。
 
@@ -800,7 +819,7 @@ def choerodon_list_comments(issue_id: str, size: int = 100, project_id: str = ""
     return _choerodon_call("list_comments", issue_id=issue_id, size=size, project_id=project_id or None)
 
 
-@mcp.tool()
+@_tool()
 def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> str:
     """为猪齿鱼任务新增评论（写操作，有副作用）。
 
@@ -818,7 +837,7 @@ def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> 
 # search_repo 跨仓搜索（内置纯标准库文件遍历,无外部脚本依赖）
 # ============================================================================
 
-@mcp.tool()
+@_tool()
 def search_repo(
     keyword: str,
     mode: str = "content",
@@ -845,7 +864,7 @@ def search_repo(
 # adapter_script_* 数据库存储脚本（Base64 仅停留在 MCP 内部）
 # ============================================================================
 
-@mcp.tool()
+@_tool()
 def search_adapter_scripts(
     tenant: str = "",
     running_service: str = "",
@@ -888,7 +907,7 @@ _advertise_nonempty_any_of(
 )
 
 
-@mcp.tool()
+@_tool()
 def get_adapter_script_info(
     script_id: int,
     site: str = "cn",
@@ -910,7 +929,7 @@ def get_adapter_script_info(
         return _err("adapter_script", str(e), retryable=False)
 
 
-@mcp.tool()
+@_tool()
 def get_adapter_script_source(
     script_id: int,
     start_line: int = 1,
@@ -942,7 +961,7 @@ def get_adapter_script_source(
         return _err("adapter_script", str(e), retryable=False)
 
 
-@mcp.tool()
+@_tool()
 def search_adapter_script_source(
     script_id: int,
     query: str,
@@ -982,7 +1001,7 @@ def search_adapter_script_source(
 # standalone_script_* 独立脚本（Marmot 脚本库，rel-table 宽表虚拟表）
 # ============================================================================
 
-@mcp.tool()
+@_tool()
 def search_standalone_scripts(
     tenant: str = "",
     query: str = "",
@@ -1021,7 +1040,7 @@ def search_standalone_scripts(
 _advertise_nonempty_any_of("search_standalone_scripts", "tenant", "query")
 
 
-@mcp.tool()
+@_tool()
 def get_standalone_script_info(
     script_id: int,
     site: str = "cn",
@@ -1043,7 +1062,7 @@ def get_standalone_script_info(
         return _err("standalone_script", str(e), retryable=False)
 
 
-@mcp.tool()
+@_tool()
 def get_standalone_script_source(
     script_id: int,
     start_line: int = 1,
@@ -1076,7 +1095,7 @@ def get_standalone_script_source(
         return _err("standalone_script", str(e), retryable=False)
 
 
-@mcp.tool()
+@_tool()
 def search_standalone_script_source(
     script_id: int,
     query: str,
@@ -1112,7 +1131,7 @@ def search_standalone_script_source(
         return _err("standalone_script", str(e), retryable=False)
 
 
-@mcp.tool()
+@_tool()
 def check_marmot_script_static(
     source: str,
     script_code: str = "",
@@ -1143,7 +1162,7 @@ def check_marmot_script_static(
 # gitlab_* 代码平台（GitLab 仓库：项目/代码/文件/目录/分支，整合自 gitlab-code-mcp）
 # ============================================================================
 
-@mcp.tool()
+@_tool()
 def gitlab_search_projects(query: str, per_page: int = 20) -> str:
     """搜索 GitLab 项目（默认禁用；仅平台明确启用搜索后注册）。
 
@@ -1174,7 +1193,7 @@ def gitlab_search_projects(query: str, per_page: int = 20) -> str:
         return _err("gitlab", str(e), retryable=True)
 
 
-@mcp.tool()
+@_tool()
 def gitlab_search_code(query: str, per_page: int = 20) -> str:
     """GitLab 代码搜索（默认禁用；仅平台明确启用搜索后注册）。
 
@@ -1214,7 +1233,7 @@ if not GITLAB_SEARCH_ENABLED:
     mcp.remove_tool("gitlab_search_code")
 
 
-@mcp.tool()
+@_tool()
 def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
     """读取 GitLab 仓库指定分支/引用下的完整文件（只读）。
 
@@ -1229,7 +1248,7 @@ def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
         return _err("gitlab", str(e), retryable=True)
 
 
-@mcp.tool()
+@_tool()
 def gitlab_list_tree(
     project_id: str,
     path: str = "",
@@ -1251,7 +1270,7 @@ def gitlab_list_tree(
         return _err("gitlab", str(e), retryable=True)
 
 
-@mcp.tool()
+@_tool()
 def gitlab_list_branches(project_id: str, per_page: int = 50) -> str:
     """列出 GitLab 仓库分支及保护状态（只读）。
 
@@ -1294,7 +1313,7 @@ def _clip_logs(logs: list[dict], clip_len: int) -> list[dict]:
     ]
 
 
-@mcp.tool()
+@_tool()
 def obs_sls_query(
     environment: str = "prod",
     trace_id: str = "",
@@ -1424,7 +1443,7 @@ def _extract_log_count(content: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-@mcp.tool()
+@_tool()
 def query_script_trace(
     trace_id: str,
     from_time: int = 0,
@@ -1502,7 +1521,7 @@ def query_script_trace(
         return _err("script_trace", str(e), retryable=isinstance(e, RuntimeError))
 
 
-@mcp.tool()
+@_tool()
 def obs_sls_targets() -> str:
     """列出阿里云 SLS 支持的系统/环境映射（只读，不含凭据）。
 
@@ -1522,7 +1541,7 @@ def obs_sls_targets() -> str:
 # ============================================================================
 
 # ---- Discovery：让 Agent 找东西 ----
-@mcp.tool()
+@_tool()
 def search_knowledge(
     query: str = "",
     knowledge_type: str = "",
@@ -1545,7 +1564,7 @@ def search_knowledge(
     return kb.search_knowledge(query, knowledge_type, system, module, status, verified_only, limit, use_semantic)
 
 
-@mcp.tool()
+@_tool()
 def search_sql_templates(
     keyword: str = "",
     category: str = "",
@@ -1567,7 +1586,7 @@ def search_sql_templates(
     return kb.search_sql_templates(keyword, category, system, business_domain, verified_only, limit, use_semantic)
 
 
-@mcp.tool()
+@_tool()
 def search_tables(
     query: str,
     domain: str = "",
@@ -1586,7 +1605,7 @@ def search_tables(
     return kb.search_tables(query, domain, db_name, top_k, use_semantic)
 
 
-@mcp.tool()
+@_tool()
 def search_pangu(query: str, system: str = "", module: str = "", category: str = "", top_k: int = 3) -> str:
     """统一快速发现：一次检索知识、模板、表及候选表关系（只读）。
 
@@ -1600,7 +1619,7 @@ def search_pangu(query: str, system: str = "", module: str = "", category: str =
 
 
 # ---- Context：获取完整上下文 ----
-@mcp.tool()
+@_tool()
 def get_knowledge(doc_id: int) -> str:
     """按 ``doc_id`` 获取单条知识的完整 Markdown 正文及元数据（只读）。
 
@@ -1610,7 +1629,7 @@ def get_knowledge(doc_id: int) -> str:
     return kb.get_knowledge(doc_id)
 
 
-@mcp.tool()
+@_tool()
 def get_sql_template(template_id: int) -> str:
     """按 ``template_id`` 获取单条 SQL 模板及风险/验证元数据（只读）。
 
@@ -1620,7 +1639,7 @@ def get_sql_template(template_id: int) -> str:
     return kb.get_sql_template(template_id)
 
 
-@mcp.tool()
+@_tool()
 def get_table(table_name: str, db_name: str = "") -> str:
     """按表名获取目录元数据详情（只读）。
 
@@ -1631,7 +1650,7 @@ def get_table(table_name: str, db_name: str = "") -> str:
     return kb.get_table(table_name, db_name)
 
 
-@mcp.tool()
+@_tool()
 def get_table_relations(table_name: str) -> str:
     """获取某张表已沉淀的关联关系（只读）。
 
@@ -1645,7 +1664,7 @@ def get_table_relations(table_name: str) -> str:
 
 
 # ---- Composite：组合诊断 ----
-@mcp.tool()
+@_tool()
 def diagnose_context(query: str, system: str = "", module: str = "", limit: int = 3) -> str:
     """组合诊断：为一个问题汇集知识 → 模板 → 表 → 关系（只读）。
 
@@ -1659,7 +1678,7 @@ def diagnose_context(query: str, system: str = "", module: str = "", limit: int 
 
 
 # ---- Action：写权限（谨慎暴露；默认需显式确认/去重） ----
-@mcp.tool()
+@_tool()
 def save_knowledge(
     title: str,
     content_md: str,
@@ -1689,7 +1708,7 @@ def save_knowledge(
     )
 
 
-@mcp.tool()
+@_tool()
 def update_knowledge(
     doc_id: int,
     title: str = "",
@@ -1719,7 +1738,7 @@ def update_knowledge(
     )
 
 
-@mcp.tool()
+@_tool()
 def delete_knowledge(doc_id: int) -> str:
     """删除指定知识条目（破坏性写操作，必须用户明确确认）。
 
@@ -1730,7 +1749,7 @@ def delete_knowledge(doc_id: int) -> str:
     return kb.delete_knowledge(doc_id)
 
 
-@mcp.tool()
+@_tool()
 def save_sql_template(
     title: str,
     category: str,
@@ -1779,7 +1798,7 @@ def save_sql_template(
     )
 
 
-@mcp.tool()
+@_tool()
 def list_sql_templates(
     category: str = "",
     system: str = "",
@@ -1795,7 +1814,7 @@ def list_sql_templates(
     return kb.list_sql_templates(category, system, business_domain, verified_only, limit)
 
 
-@mcp.tool()
+@_tool()
 def update_sql_template(
     template_id: int,
     title: str = "",
@@ -1840,7 +1859,7 @@ def update_sql_template(
     )
 
 
-@mcp.tool()
+@_tool()
 def delete_sql_template(template_id: int) -> str:
     """删除指定模板（破坏性写操作，必须用户明确确认）。
 
@@ -1850,7 +1869,7 @@ def delete_sql_template(template_id: int) -> str:
     return kb.delete_sql_template(template_id)
 
 
-@mcp.tool()
+@_tool()
 def record_template_usage(template_id: int) -> str:
     """记录一次模板复用（写入使用统计，不执行 SQL）。
 
@@ -1859,7 +1878,7 @@ def record_template_usage(template_id: int) -> str:
     return kb.record_template_usage(template_id)
 
 
-@mcp.tool()
+@_tool()
 def add_table_relation(
     from_table: str,
     to_table: str,
@@ -1891,7 +1910,7 @@ def add_table_relation(
     )
 
 
-@mcp.tool()
+@_tool()
 def record_table_usage(table_names: str) -> str:
     """记录本次实际使用过的表（写入目录使用统计）。
 
@@ -1901,7 +1920,7 @@ def record_table_usage(table_names: str) -> str:
     return kb.record_table_usage(table_names)
 
 
-@mcp.tool()
+@_tool()
 def upsert_table_knowledge(
     table_name: str, description: str = "", tags: str = "", db_name: str = "",
 ) -> str:
@@ -1928,7 +1947,7 @@ _advertise_nonempty_any_of(
 # 未配置 ES_BASE_URL 时返回 es_unconfigured，提示按 .env.example 补齐。
 # ============================================================================
 
-@mcp.tool()
+@_tool()
 def es_search(index: str, dsl: str = "", size: int = 10, env: str = "prod") -> str:
     """在正式环境 ES 指定索引上执行只读查询（_search）。
 
@@ -1953,7 +1972,7 @@ def es_search(index: str, dsl: str = "", size: int = 10, env: str = "prod") -> s
     return _ok({"index": index, "env": env, **info}, "elasticsearch")
 
 
-@mcp.tool()
+@_tool()
 def es_count(index: str, dsl: str = "", env: str = "prod") -> str:
     """统计正式环境 ES 指定索引的文档数（只读 _count，不受条数上限限制，仅返回数量）。
 
@@ -1975,7 +1994,7 @@ def es_count(index: str, dsl: str = "", env: str = "prod") -> str:
     return _ok({"index": index, "env": env, "count": info.get("count")}, "elasticsearch")
 
 
-@mcp.tool()
+@_tool()
 def es_get(index: str, doc_id: str, env: str = "prod") -> str:
     """按 _id 读取正式环境 ES 单个文档（只读 _source 端点）。
 
@@ -1998,6 +2017,34 @@ def es_get(index: str, doc_id: str, env: str = "prod") -> str:
         {"found": True, "index": index, "env": env, "_id": doc_id, "_source": info.get("_source")},
         "elasticsearch",
     )
+
+
+
+@_tool()
+def get_workflow_guide(
+    topic: Literal["overview", "requirement", "triage", "repair", "knowledge", "handoff", "capabilities"] = "overview",
+) -> str:
+    """按需读取跨 agent 的 SRM 协作协议（本地只读，无网络或业务查询）。
+
+    缺少 skills、跨流程交接或恢复任务时调用；明确单项任务无需预先调用。
+    overview 路由；requirement 需求；triage 排障；repair 修复；knowledge 沉淀；
+    handoff 证据交接。capabilities 返回当前已注册工具及读写提示，不探测后端健康。
+    工具参数仍以 tools/list schema 为准；提示不授予写入权限。
+    """
+    if topic == "capabilities":
+        return _ok({
+            "contract_version": 1,
+            "backend_health_checked": False,
+            "tools": [
+                {"name": tool.name, **tool.annotations.model_dump(exclude_none=True)}
+                for tool in sorted(mcp._tool_manager.list_tools(), key=lambda item: item.name)
+            ],
+        }, "workflow-contract")
+    try:
+        content = workflow.get_guide(topic)
+    except ValueError as exc:
+        return _err("workflow_topic", str(exc))
+    return _ok({"contract_version": 1, "topic": topic, "content": content}, "workflow-contract")
 
 
 def main() -> None:

@@ -5,7 +5,7 @@ description = "甄云盘古通用工具 MCP — 数据库(Archery)/猪齿鱼(Cho
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.2.0,<2",
+    "mcp>=1.29.0,<2",
     "requests>=2.31.0",
     "python-dotenv>=1.0.0",
     "cryptography>=41.0.0",
