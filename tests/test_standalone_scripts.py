@@ -1,6 +1,8 @@
 """Standalone (Marmot) script decoding, cache, range, search, and tool exposure tests."""
 import base64
+import hashlib
 import os
+import sqlite3
 import sys
 
 import pytest
@@ -14,8 +16,9 @@ def _encoded(source: str, encoding: str = "utf-16-le", trailing: bytes = b"") ->
     return base64.b64encode(source.encode(encoding) + trailing).decode("ascii")
 
 
-def test_decode_real_utf16le_template_sample():
-    # Row captured on dev (SRM-PECHION print template, 2026-09-05).
+def test_decode_base64_test_input_does_not_establish_source_mapping():
+    # Historical longValue1 sample is test input, NOT a script/template body.
+    # Keep as an encoding fixture only; repository tests verify source selection.
     content = ("AHsACgAgACAAIAAgACIAdABlAG4AYQBuAHQASQBkACIAOgA3ADMAMQAsAAoA"
                "IAAgACAAIAAiAHMAZQB0AHQAbABlAEgAZQBhAGQAZQByAEkAZAAiADoANQAzADkANAA0AAoAfQ==")
     assert standalone_scripts.decode_script_content(content) == (
@@ -42,7 +45,16 @@ def test_decode_script_content_plain_utf8():
     assert standalone_scripts.decode_script_content(None) == ""
 
 
-@pytest.mark.parametrize("content", ["%%%", 123])
+@pytest.mark.parametrize("source", [
+    "// 中文注释\nfunction process(input) { return input; }",
+    "const value = input.value;",
+    "not base64!",
+])
+def test_decode_script_content_accepts_plain_source(source):
+    assert standalone_scripts.decode_script_content(source) == source
+
+
+@pytest.mark.parametrize("content", ["\x00\x01\x02", 123])
 def test_decode_script_content_rejects_invalid_content(content):
     with pytest.raises(standalone_scripts.ScriptDecodeError):
         standalone_scripts.decode_script_content(content)
@@ -163,3 +175,98 @@ def test_standalone_script_tools_are_exposed():
 def test_tool_rejects_empty_search_before_backend_access():
     with pytest.raises(ValueError, match="tenant、query"):
         server.search_standalone_scripts()
+
+
+@pytest.fixture
+def stored_script(monkeypatch):
+    """Exercise real repository SELECT/projection, not a preselected fake source."""
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("""
+        CREATE TABLE spfm_rel_table_record (
+            id INTEGER PRIMARY KEY, table_code TEXT, value1 TEXT, value2 TEXT,
+            value3 TEXT, value4 TEXT, value5 TEXT, creation_date TEXT,
+            last_update_date TEXT, longValue TEXT, longValue1 TEXT,
+            longValue2 TEXT, longValue3 TEXT, longValue4 TEXT, longValue5 TEXT
+        )
+    """)
+    source = "function process(input) {\n  return input.actualSourceMarker;\n}"
+    connection.execute(
+        """INSERT INTO spfm_rel_table_record
+           (id, table_code, value2, value3, last_update_date, longValue1, longValue5)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (42, "marmot_script_library", "TEST-TENANT", "TEST_SCRIPT",
+         "2026-09-16 00:00:00", _encoded('{"testInputOnly": true}'), _encoded(source)),
+    )
+    queries = []
+
+    class Client:
+        def query(self, sql, instance, db, limit):
+            queries.append(sql)
+            return {"rows": [dict(row) for row in connection.execute(sql)]}
+
+    repository = standalone_scripts.StandaloneScriptRepository()
+    monkeypatch.setattr(repository, "_connection", lambda *args: (Client(), "test", "srm"))
+    service = standalone_scripts.StandaloneScriptService(repository)
+    yield connection, service, source, queries
+    connection.close()
+
+
+def test_repository_reads_actual_source_when_test_input_is_present(stored_script):
+    _, service, source, queries = stored_script
+    result = service.get_source(42, full=True)
+    assert result["source"] == source
+    assert result["source_hash"] == hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert result["source_column"] == "longValue5"
+    assert service.get_info(42)["source_column"] == "longValue5"
+    assert all("longValue1" not in sql for sql in queries)
+    assert service.search_source(42, "testInputOnly")["match_count"] == 0
+    found = service.search_source(42, "actualSourceMarker", context_lines=0)
+    assert found["matches"][0]["line"] == 2
+    assert found["source_column"] == "longValue5"
+
+
+def test_repository_returns_plain_text_source_from_long_value5(stored_script):
+    connection, service, source, _ = stored_script
+    connection.execute("UPDATE spfm_rel_table_record SET longValue5 = ? WHERE id = 42", (source,))
+    result = service.get_source(42, full=True)
+    assert result["source"] == source
+    assert result["source_column"] == "longValue5"
+    assert result["stored_size"] == len(source)
+
+
+@pytest.mark.parametrize("value", [None, "", " \n\t"])
+def test_empty_source_never_falls_back_to_test_input(stored_script, value):
+    connection, service, _, _ = stored_script
+    connection.execute("UPDATE spfm_rel_table_record SET longValue5 = ? WHERE id = 42", (value,))
+    result = service.get_source(42, full=True)
+    assert result["source"] == ""
+    assert result["total_lines"] == 0
+    assert service.search_source(42, "testInputOnly")["match_count"] == 0
+
+
+@pytest.mark.parametrize("value", [b"unexpected binary", "\x00\x01"])
+def test_invalid_source_fails_instead_of_using_valid_test_input(stored_script, value):
+    connection, service, _, _ = stored_script
+    connection.execute("UPDATE spfm_rel_table_record SET longValue5 = ? WHERE id = 42", (value,))
+    with pytest.raises(standalone_scripts.ScriptDecodeError):
+        service.get_source(42, full=True)
+
+
+def test_missing_source_projection_fails_closed(monkeypatch):
+    class Client:
+        def query(self, *args):
+            return {"rows": [{"longValue1": _encoded('{"testInputOnly": true}')}]}
+
+    repository = standalone_scripts.StandaloneScriptRepository()
+    monkeypatch.setattr(repository, "_connection", lambda *args: (Client(), "test", "srm"))
+    with pytest.raises(standalone_scripts.ScriptDecodeError, match="缺少源码字段"):
+        repository.get_encoded_source(42)
+
+
+def test_old_slot_cache_entry_cannot_be_reused(stored_script):
+    _, service, source, _ = stored_script
+    service.cache.put("cn:default:srm:42:2026-09-16 00:00:00", '{"testInputOnly": true}', 42)
+    result = service.get_source(42, full=True)
+    assert result["source"] == source
+    assert result["performance"]["cache"] == "miss"

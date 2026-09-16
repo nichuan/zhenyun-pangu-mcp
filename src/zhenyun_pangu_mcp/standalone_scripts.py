@@ -2,14 +2,16 @@
 
 Standalone scripts (Marmot script library) have NO dedicated physical table:
 every row lives in the rel-table wide table ``spfm_rel_table_record`` with
-``table_code = 'marmot_script_library'``. Slot mapping (verified on 2026-09-05):
+``table_code = 'marmot_script_library'``. Source mapping verified against
+``spfm_rel_table_definition.mapping_json`` on cn/prod/srm, 2026-09-16:
 
     value1     -> type flag (1/2)
     value2     -> apply tenant num (tenant_id is always 0; filter by value2!)
     value3     -> script code (task_code)
     value4     -> description
     value5     -> content kind (e.g. ``template``)
-    longValue1 -> script/template body (Base64; encoding varies per row)
+    longValue5 -> content: script/template body (plain text or legacy Base64)
+    longValue1 -> contentInput: test input, NEVER a source fallback
 
 This module is the boundary that prevents encoded payloads from reaching MCP
 callers: repositories read the encoded value, while every public service method
@@ -45,8 +47,8 @@ logger = logging.getLogger(__name__)
 #: rel-table ``table_code`` that hosts the standalone Marmot script library.
 SCRIPT_LIBRARY_TABLE_CODE = "marmot_script_library"
 
-#: longValue slots probed (in order) for the script/template body.
-_CONTENT_COLUMNS = ("longValue1", "longValue2", "longValue3", "longValue", "longValue4", "longValue5")
+#: Fixed semantic mapping, not a heuristic based on which slot is populated.
+SOURCE_COLUMN = "longValue5"
 
 _METADATA_COLUMNS = (
     "id AS script_id, value1 AS type_flag, value2 AS tenant_num, "
@@ -75,24 +77,28 @@ def _looks_like_text(text: str) -> bool:
 
 
 def decode_script_content(content: str | None) -> str:
-    """Decode a Base64 slot body, detecting the per-row text encoding.
+    """Read plain text or decode a legacy Base64 source body.
 
-    Sampled rows store UTF-16LE JSON templates, while other rows may hold
-    UTF-16BE JavaScript or plain UTF-8. Decode Base64 then pick the encoding
-    that produces readable text (highest printable ratio wins on ties).
+    ``longValue5`` is semantically the source column. Current rows can contain
+    plain text; legacy rows can contain Base64-wrapped UTF-16LE, UTF-16BE or
+    UTF-8. A readable plain value is therefore valid source, while binary or
+    control-character garbage is rejected. Slot selection is handled by the
+    repository and never falls back to ``longValue1``.
     """
     if content is None or content == "":
         return ""
     if not isinstance(content, str):
-        raise ScriptDecodeError("脚本正文必须是 Base64 字符串")
+        raise ScriptDecodeError("脚本正文必须是字符串")
 
     compact = "".join(content.split())
     if not compact:
         return ""
     try:
         raw = base64.b64decode(compact, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ScriptDecodeError("脚本正文不是合法 Base64") from exc
+    except (binascii.Error, ValueError):
+        if _looks_like_text(content):
+            return content
+        raise ScriptDecodeError("脚本正文既不是可读明文，也不是合法 Base64")
 
     if not raw:
         return ""
@@ -125,12 +131,10 @@ def decode_script_content(content: str | None) -> str:
         if best is None or (ascii_like, printable) > best[:2]:
             best = (ascii_like, printable, text)
     if best is None:
-        raise ScriptDecodeError("脚本正文无法按 UTF-16LE/UTF-16BE/UTF-8 解码为可读文本")
+        # The stored value was syntactically valid Base64, so treating that
+        # wrapper itself as plain source would hide corrupt/binary payloads.
+        raise ScriptDecodeError("脚本正文是 Base64，但解码结果不是可读文本")
     return best[2]
-
-
-def _content_column_expression() -> str:
-    return ", ".join(_CONTENT_COLUMNS)
 
 
 class StandaloneScriptRepository:
@@ -212,7 +216,7 @@ class StandaloneScriptRepository:
         """Return ``(encoded_content, content_kind, elapsed_ms)``."""
         script_id = _script_id(script_id)
         sql = (
-            f"SELECT {_content_column_expression()} "
+            f"SELECT {SOURCE_COLUMN} AS encoded_source "
             "FROM spfm_rel_table_record "
             f"WHERE table_code = {_sql_literal(SCRIPT_LIBRARY_TABLE_CODE)} "
             f"AND id = {script_id} LIMIT 1"
@@ -224,12 +228,13 @@ class StandaloneScriptRepository:
         rows = result.get("rows") or []
         if not rows:
             raise ScriptNotFoundError(f"未找到 script_id={script_id} 的独立脚本正文")
-        content = ""
-        for column in _CONTENT_COLUMNS:
-            value = rows[0].get(column)
-            if isinstance(value, str) and value.strip():
-                content = value
-                break
+        if "encoded_source" not in rows[0]:
+            raise ScriptDecodeError("查询结果缺少源码字段 longValue5，不能使用测试用例或其它槽位代替")
+        content = rows[0]["encoded_source"]
+        if content is None:
+            content = ""
+        if not isinstance(content, str):
+            raise ScriptDecodeError("源码字段 longValue5 必须是 Base64 字符串或空值")
         return content, None, elapsed
 
 
@@ -254,7 +259,7 @@ class StandaloneScriptService:
         site = connection.get("site") or "cn"
         instance = connection.get("instance") or "default"
         db = connection.get("db") or ARCHERY_DEFAULT_DB
-        return f"{site}:{instance}:{db}:{metadata.get('script_id')}:{version}"
+        return f"{site}:{instance}:{db}:{metadata.get('script_id')}:{SOURCE_COLUMN}:{version}"
 
     def search_scripts(self, **kwargs) -> dict[str, Any]:
         if not any((kwargs.get("tenant"), kwargs.get("query"))):
@@ -266,6 +271,7 @@ class StandaloneScriptService:
             "storage": {
                 "table": "spfm_rel_table_record",
                 "table_code": SCRIPT_LIBRARY_TABLE_CODE,
+                "source_column": SOURCE_COLUMN,
                 "note": "独立脚本存于 rel-table 宽表，租户过滤用 value2（tenant_id 恒为 0）",
             },
             "performance": {"db_ms": round(db_ms, 3)},
@@ -277,7 +283,8 @@ class StandaloneScriptService:
         result = dict(metadata)
         result.update({
             "language": "javascript",
-            "encoding_at_rest": "base64 (utf-16-le/utf-16-be/utf-8 per row)",
+            "source_column": SOURCE_COLUMN,
+            "encoding_at_rest": "plain text or base64 (utf-16-le/utf-16-be/utf-8 per row)",
             "source_cached": cached is not None,
             "cache_ttl_seconds": self.cache.ttl_seconds,
             "performance": {"db_ms": round(db_ms, 3)},
@@ -285,6 +292,7 @@ class StandaloneScriptService:
         if cached is not None:
             result.update({
                 "encoded_size": cached.encoded_size,
+                "stored_size": cached.encoded_size,
                 "source_length": len(cached.source),
                 "total_lines": len(cached.source.splitlines()),
                 "source_hash": cached.source_hash,
@@ -301,20 +309,20 @@ class StandaloneScriptService:
         cache_hit = entry is not None
 
         if entry is None:
-            encoded, _, source_db_ms = self.repository.get_encoded_source(script_id, **kwargs)
+            stored_content, _, source_db_ms = self.repository.get_encoded_source(script_id, **kwargs)
             decode_started = time.perf_counter()
             try:
-                source = decode_script_content(encoded)
+                source = decode_script_content(stored_content)
             except ScriptDecodeError as exc:
                 logger.error(
-                    "standalone_script decode failed script_id=%s encoded_size=%d error=%s",
+                    "standalone_script decode failed script_id=%s stored_size=%d error=%s",
                     script_id,
-                    len(encoded),
+                    len(stored_content),
                     type(exc).__name__,
                 )
                 raise
             decode_ms = (time.perf_counter() - decode_started) * 1000
-            entry = self.cache.put(key, source, len(encoded))
+            entry = self.cache.put(key, source, len(stored_content))
 
         total_ms = (time.perf_counter() - total_started) * 1000
         performance = {
@@ -400,10 +408,12 @@ class StandaloneScriptService:
         return {
             **metadata,
             "language": "javascript",
+            "source_column": SOURCE_COLUMN,
             "start_line": actual_start,
             "end_line": actual_end,
             "total_lines": total_lines,
             "encoded_size": entry.encoded_size,
+            "stored_size": entry.encoded_size,
             "source_length": len(source),
             "source_hash": entry.source_hash,
             "source": selected,
@@ -475,6 +485,7 @@ class StandaloneScriptService:
         return {
             **metadata,
             "language": "javascript",
+            "source_column": SOURCE_COLUMN,
             "query": query,
             "match_count": len(matches),
             "matches": matches,

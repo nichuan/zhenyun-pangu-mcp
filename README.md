@@ -60,6 +60,12 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `gitlab_*` | `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 仅对已知 project/ref/path 做精确读取；`gitlab_search_projects/code` 默认不注册，避免失败后回退 |
 | `search_repo` | `search_repo` | 普通代码检索的默认入口：跨本地代码仓库搜索（内容 / 文件名 / 模块结构） |
 
+独立脚本正文只读取 `spfm_rel_table_record.longValue5`（虚拟字段 `content`）；
+`longValue1` 是 `contentInput`（测试用例），不能作为源码回退。映射已于 2026-09-16
+核对 `cn/prod/srm` 的 `marmot_script_library` 定义。支持明文源码与历史 Base64，
+源码为空返回空正文，无法识别的乱码报错；
+读取/搜索结果通过 `source_column` 标识来源，缓存按源码列隔离。
+
 ## 知识库工具使用指南
 
 认知层存放的是可复用的稳定知识和目录元数据，不是生产实时事实。调用顺序按问题类型选择：

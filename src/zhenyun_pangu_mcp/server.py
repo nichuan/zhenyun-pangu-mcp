@@ -1074,7 +1074,8 @@ def get_standalone_script_source(
 ) -> str:
     """读取服务端已解码的独立脚本源码/模板正文（只读，永不返回 Base64）。
 
-    正文取自 longValue 槽位（Base64，服务端自动探测 UTF-16LE/UTF-16BE/UTF-8 解码）。
+    正文只取 longValue5（content），longValue1 是测试用例，禁止回退到其它槽位。
+    支持明文源码及历史 Base64（自动探测 UTF-16LE/UTF-16BE/UTF-8）；源码为空返回空正文。
     默认从 start_line 起返回 200 行，单次局部读取最多 500 行；只有确实需要全局
     分析时才设置 ``full=true``，定位字段、函数或报文时应先调用
     search_standalone_script_source。
@@ -1109,6 +1110,7 @@ def search_standalone_script_source(
 ) -> str:
     """在服务端解码后的独立脚本中搜索并返回少量上下文（只读）。
 
+    只搜索 longValue5（content）源码，不搜索 longValue1 测试用例。
     适合定位字段、函数、接口地址、报文映射或异常文本。默认按普通字符串、
     不区分大小写搜索；除非确有需要，不要启用 regex。搜索结果只包含匹配区间，
     不返回 Base64，也不默认返回完整脚本。
