@@ -4,8 +4,7 @@
   - obs_*       日志查询（阿里云 SLS：国内公有云盘古 prod/dev/test；Loki：仅 AWS 海外）
   - archery_*   数据库查询（Archery 双站点 cn/aws + 盘古专属租户/实例/库列表）
   - es_*        正式环境 ES 只读查询（整合自 es-prod；铁律：严禁写、单次 ≤ ES_MAX_SIZE）
-  - *_adapter_script* 适配器脚本发现、服务端解码、局部读取与正文搜索
-  - *_standalone_script* 独立脚本/API 检索与源码读取
+  - search_*_scripts 适配器/独立脚本身份发现（当前正文改由 Script Platform MCP 读取）
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
   - search_repo 跨仓代码搜索（内置纯标准库文件遍历，零外部依赖）
   - gitlab_*    已知 GitLab 项目/分支/路径的精确读取（搜索默认禁用）
@@ -35,6 +34,7 @@ from .config import (
     ARCHERY_DEFAULT_DB,
     GITLAB_SEARCH_ENABLED,
     LOKI_PLATFORMS,
+    PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS,
 )
 from .knowledge_base import service as kb
 from . import workflow
@@ -48,6 +48,9 @@ mcp = FastMCP(
     "zhenyun-pangu-mcp",
     instructions=(
         "SRM tools: business DB/ES read-only; knowledge/comment tools have side effects. "
+        "Script discovery tools only locate adapter/independent identities; use "
+        "zhenyun-script-platform-mcp as the authoritative source for current script body, "
+        "version, debug, save, and deployment. "
         "When skills are unavailable or a task crosses workflows, use get_workflow_guide; "
         "otherwise call the specific tool directly. Reuse scoped evidence, verify live facts, "
         "and do not treat tool annotations as user authorization."
@@ -60,6 +63,13 @@ def _tool():
     def register(fn):
         return mcp.tool(annotations=tool_annotations(fn.__name__))(fn)
     return register
+
+
+def _legacy_script_read_tool():
+    """Keep old Python APIs for rollback without advertising duplicate MCP tools."""
+    if PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS:
+        return _tool()
+    return lambda fn: fn
 
 
 BJ = timezone(timedelta(hours=8))
@@ -878,9 +888,10 @@ def search_adapter_scripts(
     """检索租户二开、适配器和外部接口脚本元信息（只读，不返回脚本正文）。
 
     二开、客户定制、ERP/WMS/OA 对接、回调、推送、同步、报文或字段映射问题，
-    应优先调用本工具，而不是只搜索本地 Java。tenant/running_service/query 至少提供一项；
-    ``query`` 匹配 task_code/description。命中 ``script_id`` 后先按需调用
-    search_adapter_script_source，再局部读取 get_adapter_script_source。
+    应优先调用本工具发现脚本身份，而不是只搜索本地 Java。tenant/running_service/query
+    至少提供一项；``query`` 匹配 task_code/description。取得唯一精确的 tenant、task_code、
+    running_service 后，必须改用 zhenyun-script-platform-mcp 的 adapter_get 读取平台当前
+    Header、Lines、源码、版本和启用状态。本工具结果不作为 Debug/Deploy 的源码依据。
     """
     if not any(value.strip() for value in (tenant, running_service, query)):
         raise ValueError("tenant、running_service、query 至少提供一项非空值")
@@ -907,7 +918,7 @@ _advertise_nonempty_any_of(
 )
 
 
-@_tool()
+@_legacy_script_read_tool()
 def get_adapter_script_info(
     script_id: int,
     site: str = "cn",
@@ -929,7 +940,7 @@ def get_adapter_script_info(
         return _err("adapter_script", str(e), retryable=False)
 
 
-@_tool()
+@_legacy_script_read_tool()
 def get_adapter_script_source(
     script_id: int,
     start_line: int = 1,
@@ -961,7 +972,7 @@ def get_adapter_script_source(
         return _err("adapter_script", str(e), retryable=False)
 
 
-@_tool()
+@_legacy_script_read_tool()
 def search_adapter_script_source(
     script_id: int,
     query: str,
@@ -1016,8 +1027,9 @@ def search_standalone_scripts(
     存于 rel-table 宽表 ``spfm_rel_table_record``（table_code=marmot_script_library），
     无独立物理表；租户编码在 value2 槽位（tenant_id 恒为 0，勿按 tenant_id 过滤）。
     适用于定时任务、打印模板、导入、消息提醒等非挂钩点二开脚本。
-    tenant/query 至少提供一项；``query`` 匹配脚本编码/描述。命中 ``script_id``
-    后按需调用 search_standalone_script_source，再局部读取 get_standalone_script_source。
+    tenant/query 至少提供一项；``query`` 匹配脚本编码/描述。取得唯一精确的 tenant 和 code
+    后，必须改用 zhenyun-script-platform-mcp 的 independent_script_get 读取平台当前 Record、
+    源码、版本和 Fixture。本工具结果不作为 Debug/Save 的源码依据。
     """
     if not any(value.strip() for value in (tenant, query)):
         raise ValueError("tenant、query 至少提供一项非空值")
@@ -1040,7 +1052,7 @@ def search_standalone_scripts(
 _advertise_nonempty_any_of("search_standalone_scripts", "tenant", "query")
 
 
-@_tool()
+@_legacy_script_read_tool()
 def get_standalone_script_info(
     script_id: int,
     site: str = "cn",
@@ -1062,7 +1074,7 @@ def get_standalone_script_info(
         return _err("standalone_script", str(e), retryable=False)
 
 
-@_tool()
+@_legacy_script_read_tool()
 def get_standalone_script_source(
     script_id: int,
     start_line: int = 1,
@@ -1096,7 +1108,7 @@ def get_standalone_script_source(
         return _err("standalone_script", str(e), retryable=False)
 
 
-@_tool()
+@_legacy_script_read_tool()
 def search_standalone_script_source(
     script_id: int,
     query: str,

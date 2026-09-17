@@ -160,16 +160,17 @@ def test_source_range_and_search(service):
         script_service.search_source(91890309802811180, "[", regex=True)
 
 
-def test_standalone_script_tools_are_exposed():
+def test_only_script_identity_discovery_tools_are_exposed_by_default():
     tools = server.mcp._tool_manager._tools
 
     assert "search_standalone_scripts" in tools
-    assert "get_standalone_script_info" in tools
-    assert "get_standalone_script_source" in tools
-    assert "search_standalone_script_source" in tools
-    # 历史工具仍保留为适配器脚本检索
     assert "search_adapter_scripts" in tools
-    assert "get_adapter_script_source" in tools
+    assert "get_standalone_script_info" not in tools
+    assert "get_standalone_script_source" not in tools
+    assert "search_standalone_script_source" not in tools
+    assert "get_adapter_script_info" not in tools
+    assert "get_adapter_script_source" not in tools
+    assert "search_adapter_script_source" not in tools
 
 
 def test_tool_rejects_empty_search_before_backend_access():

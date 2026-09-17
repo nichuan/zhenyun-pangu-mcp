@@ -206,7 +206,7 @@ def test_disabled_gitlab_search_tools_are_not_exposed():
     assert "search_repo" in tools
     assert "gitlab_get_file" in tools
     assert "search_adapter_scripts" in tools
-    assert "search_adapter_script_source" in tools
+    assert "search_adapter_script_source" not in tools
 
 
 def test_disabled_gitlab_search_fails_fast_without_network():

@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "zhenyun-pangu-mcp": {
+      "command": "uv",
+      "args": ["run", "--project", ".", "zhenyun-pangu-mcp"],
+      "cwd": "./servers/zhenyun-pangu-mcp",
+      "env": {
+        "MCP_ENV_DIR": "/Users/chuanni/workspace/project/myproject/zhenyun-tools/zhenyun-pangu-mcp"
+      }
+    },
+    "zhenyun-script-platform-mcp": {
+      "command": "uv",
+      "args": ["run", "--project", ".", "zhenyun-script-platform-mcp"],
+      "cwd": "./servers/zhenyun-script-platform-mcp",
+      "env": {
+        "SCRIPT_PLATFORM_ENV_DIR": "/Users/chuanni/workspace/project/myproject/zhenyun-tools/zhenyun-script-platform-mcp"
+      }
+    }
+  }
+}

@@ -2,18 +2,21 @@
 
 > ## 架构定位：盘古「实时接口」
 >
-> 在四层架构中，本 MCP 是 **Knowledge / Skill / Template 之外的唯一"实时事实"来源**：
+> 在四层架构中，本 MCP 是日志、数据库、猪齿鱼和代码的**实时事实来源**；脚本平台当前源码、
+> 版本、Fixture 和启用状态由独立的 `zhenyun-script-platform-mcp` 提供：
 >
 > | 层 | 回答什么 | 载体 |
 > |---|---|---|
 > | **Skill** | 这个任务应该怎么做 | `custom-skills/` 的 SKILL.md（编排流程） |
 > | **Knowledge** | 业务/系统/字段**是什么** | 本 MCP 的 `knowledge_base/`（稳定事实，沉淀于 knowledge_docs） |
 > | **Template** | 以前类似问题**怎么解决** | 本 MCP 的 `knowledge_base/`（SQL 模板，沉淀于 sql_templates） |
-> | **zhenyun-pangu-mcp** | **现在**生产环境真实**是什么/发生了什么** | 本 MCP（日志 / 数据 / 猪齿鱼 / 代码） |
+> | **zhenyun-pangu-mcp** | **现在**业务环境真实**是什么/发生了什么** | 本 MCP（日志 / 数据 / 猪齿鱼 / 代码 / 脚本身份发现） |
+> | **zhenyun-script-platform-mcp** | 平台当前脚本是什么、如何真实调试与安全保存 | Script Platform API / DEV GraalJS Runtime |
 >
 > **边界原则**：
 > - 所有**可能变化**的实时事实（当前日志、当前数据、当前 Schema、当前状态、当前服务状态）一律走本 MCP。
 > - 静态知识（Skill Markdown / Knowledge / Template）只负责帮助 Agent 理解这些实时数据意味着什么，**不替代实时查询**。
+> - Pangu 的脚本搜索只负责发现精确身份；当前源码、版本、Fixture、Debug、Save、Deploy 必须使用 `zhenyun-script-platform-mcp`。
 > - 旧的独立 `log-ops` / `sql-ops` / `gitlab-code` MCP 已被本 MCP 整合取代，不再是正式概念，请勿引用。
 >
 > **能力分类**（供 Agent 理解"何时用哪类工具"）：
@@ -22,7 +25,7 @@
 > - **数据能力**：`archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances`
 > - **ES 只读能力**：`es_search` / `es_count` / `es_get`（prod/dev/test，未配置时返回明确降级提示）
 > - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，以只读查询为主，`choerodon_add_comment` 为需确认的写操作）
-> - **代码与脚本能力**：`search_repo`（本地跨仓搜索）+ `*_adapter_script*`（数据库脚本发现、服务端解码、搜索与局部读取）+ 已知路径的 `gitlab_list_branches/list_tree/get_file` 精确读取。当前 GitLab 项目/代码搜索默认禁用。
+> - **代码与脚本能力**：`search_repo`（本地跨仓搜索）+ `search_adapter_scripts` / `search_standalone_scripts`（只发现脚本身份）+ 已知路径的 `gitlab_list_branches/list_tree/get_file` 精确读取。当前脚本正文统一由 Script Platform MCP 获取；GitLab 项目/代码搜索默认禁用。
 >
 > **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼查询类（`choerodon_*_issue` / `choerodon_list_*` / `choerodon_search_*` / `choerodon_get_*` / `choerodon_download_*`）、代码检索为**只读**，Agent 可自主调用。`archery_query` 的用户 SQL 只允许单条基础 `SELECT`、`EXPLAIN SELECT` 或 `SHOW CREATE TABLE`，不支持其它 `SHOW/DESC`、`WITH`、多语句、注释、函数/子查询、窗口函数、集合运算或任何写入语法；实例/库/表结构由专用工具提供。任何生产 INSERT/UPDATE/DELETE **不在本 MCP 提供**，统一由 Skill 生成 SQL 后交用户人工确认执行。认知层的 `search_*` / `get_*` / `diagnose_context` / `list_sql_templates` 为只读；`save_*`、`update_*`、`delete_*`、`add_table_relation`、`upsert_table_knowledge` 和使用统计工具会写入 knowledge_docs / sql_templates / table_catalog / table_relations 元数据，不影响业务数据，调用前应确认沉淀内容。`choerodon_add_comment` 会真实写入猪齿鱼评论，必须先确认内容；评论必须传规范 Markdown，禁止纯文本和原始 HTML，工具会负责 Markdown 渲染。
 
@@ -40,7 +43,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 
 ## 能力总览
 
-工具按前缀/能力分组（默认共 60 个；GitLab 搜索开启后增加 2 个；实时清单可用 `get_workflow_guide(topic="capabilities")` 查看）：
+工具按前缀/能力分组（旧脚本正文工具默认隐藏；实时清单可用 `get_workflow_guide(topic="capabilities")` 查看）：
 
 | 前缀 | 工具 | 说明 |
 |------|------|------|
@@ -54,17 +57,14 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `obs_*` | `obs_sls_query` / `obs_sls_targets` / `obs_log_query` / `obs_log_trace` / `obs_log_datasources` | 日志能力：阿里云 SLS（国内公有云盘古 prod + 非生产 dev/test 全覆盖）+ Loki（仅 AWS 海外全环境） |
 | `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` | 数据能力（Archery 双站点 cn/aws + 盘古专属租户/库/实例能力） |
 | `es_*` | `es_search` / `es_count` / `es_get` | 工作台 ES 的 prod/dev/test 只读查询；禁止写入，单次最多返回 `ES_MAX_SIZE` 条 |
-| `*_adapter_script*` | `search_adapter_scripts` / `get_adapter_script_info` / `search_adapter_script_source` / `get_adapter_script_source` | 数据库存储脚本：元信息发现、MCP 内 Base64(UTF-16BE) 解码、关键词搜索和按行读取；不向 Agent 返回 Base64 |
-| `*_standalone_script*` | `search_standalone_scripts` / `get_standalone_script_info` / `search_standalone_script_source` / `get_standalone_script_source` | Marmot 独立脚本/API：元信息发现、服务端解码、关键词搜索和按行读取 |
+| 脚本身份发现 | `search_adapter_scripts` / `search_standalone_scripts` | 只按租户、服务、编码或描述发现候选；命中后使用 `zhenyun-script-platform-mcp` 的 `adapter_get` / `independent_script_get` 读取权威当前态 |
 | `choerodon_*` | `choerodon_list_projects` / `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_add_comment` | 业务系统能力：猪齿鱼协作（可按 ID/名称/编码发现当前账号可访问项目；前 9 个为只读查询，`choerodon_add_comment` 为写操作，需确认） |
 | `gitlab_*` | `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 仅对已知 project/ref/path 做精确读取；`gitlab_search_projects/code` 默认不注册，避免失败后回退 |
 | `search_repo` | `search_repo` | 普通代码检索的默认入口：跨本地代码仓库搜索（内容 / 文件名 / 模块结构） |
 
-独立脚本正文只读取 `spfm_rel_table_record.longValue5`（虚拟字段 `content`）；
-`longValue1` 是 `contentInput`（测试用例），不能作为源码回退。映射已于 2026-09-16
-核对 `cn/prod/srm` 的 `marmot_script_library` 定义。支持明文源码与历史 Base64，
-源码为空返回空正文，无法识别的乱码报错；
-读取/搜索结果通过 `source_column` 标识来源，缓存按源码列隔离。
+旧 `get/search_*_script_source` Python 实现暂时保留作紧急回滚，但默认不注册为 MCP 工具，避免
+与 Script Platform MCP 形成两个正文来源。只有显式设置
+`PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS=true` 才临时暴露；常规 Agent/Skill 不得依赖该开关。
 
 ## 知识库工具使用指南
 
@@ -186,7 +186,8 @@ uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
 
 ## 打包为 Codex 插件
 
-工作区中的 `custom-skills/` 与本 MCP 已打包为个人插件 `zhenyun-pangu-toolkit`。
+工作区中的 `custom-skills/`、本 MCP 与独立的 `zhenyun-script-platform-mcp` 已打包为个人插件
+`zhenyun-pangu-toolkit`。
 修改任意 skill 或 MCP 源码后，在本目录执行：
 
 ```bash
@@ -227,8 +228,8 @@ uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
 | GitLab | `GITLAB_BASE_URL` / `GITLAB_TOKEN`（或 `GITLAB_USERNAME`/`GITLAB_PASSWORD`） | GitLab 仓库地址与凭据 |
 | | `GITLAB_SEARCH_ENABLED` | 默认 `false`，不注册不可用的 GitLab 项目/代码搜索；仅平台能力恢复后显式开启 |
 | | `GITLAB_SEARCH_ROOT_ID` / `GITLAB_SEARCH_ROOT_GROUP` | 代码搜索根目录（限定 group/project，避免全站噪声） |
-| 适配器脚本 | `ADAPTER_SCRIPT_CACHE_MAX_ENTRIES` / `ADAPTER_SCRIPT_CACHE_TTL_SECONDS` | 解码源码 LRU 容量与 TTL；版本/更新时间变化会立即形成新缓存键 |
-| | `ADAPTER_SCRIPT_DEFAULT_LINES` / `ADAPTER_SCRIPT_MAX_RANGE_LINES` / `ADAPTER_SCRIPT_MAX_RANGE_CHARS` | 默认与最大局部源码返回范围 |
+| 脚本发现/兼容 | `PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS` | 默认 `false`，只暴露两项身份发现工具；仅紧急回滚时临时开启旧正文工具 |
+| | `ADAPTER_SCRIPT_CACHE_*` / `ADAPTER_SCRIPT_*_LINES` / `ADAPTER_SCRIPT_MAX_RANGE_CHARS` | 仅旧正文工具启用时使用的解码缓存与返回范围配置 |
 | Embedding | `CF_API_TOKEN` / `CF_ACCOUNT_ID` / `CF_EMBED_MODEL` / `CF_EMBEDDING_DIMENSION` | Cloudflare Workers AI 凭据（默认 `@cf/qwen/qwen3-embedding-0.6b` / 1024 维），向量写单列 `embedding`；未配置时语义检索降级为关键词 |
 | 其他 | `PG_ROOT` | 本地跨仓搜索根目录（默认本仓库根） |
 
@@ -239,7 +240,8 @@ uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
 **成功返回**：各工具返回 JSON 字符串，尽量包含 `summary / total / results` 等摘要 + 关键结果，避免一次性返回数千行吃 Agent Context：
 - 日志查询：`obs_log_query` / `obs_log_trace` 返回 `total`（命中总数）+ 截断后的 `results`（按 `limit`），`obs_log_trace` 附 `meta.error_count / warn_count`，可用 `level=error` 省 token。
 - 数据查询：`archery_query` 返回行集与数量；查询大结果集建议缩小 `limit` 或用更精准 WHERE。
-- 脚本查询：元信息查询不读取正文；源码 Tool 只返回解码后的 JavaScript，并附 DB/decode/cache/结果准备耗时。定位具体字段或函数时优先搜索正文和局部读取。
+- 脚本查询：Pangu 只返回 Adapter/Independent Script 候选身份；命中后用 Script Platform MCP 的
+  `adapter_get` / `independent_script_get` 获取当前正文、版本和 Fixture。
 
 **失败返回**：工具异常一律返回 `{"error": "<原因>"}` 的 JSON 字符串，不抛 500。常见原因：
 - `参数错误`：site/instance/db/query 取值非法（如未知 region）。

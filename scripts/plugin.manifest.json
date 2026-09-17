@@ -1,0 +1,38 @@
+{
+  "name": "zhenyun-pangu-toolkit",
+  "version": "0.1.0",
+  "description": "甄云 SRM 开发与运维工具集：业务 Skills、盘古事实查询 MCP 与脚本平台读取、调试和受控部署 MCP。",
+  "author": {
+    "name": "Zhenyun Engineering"
+  },
+  "license": "MIT",
+  "keywords": [
+    "zhenyun",
+    "pangu",
+    "srm",
+    "operations",
+    "mcp",
+    "database",
+    "logs",
+    "script-platform",
+    "adapter"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "甄云盘古工具集",
+    "shortDescription": "盘古事实查询与 SRM 脚本平台开发工具",
+    "longDescription": "整合甄云 SRM 排障、SQL、Archery、GitLab、猪齿鱼等 Skills，并明确分工：盘古 MCP 负责发现、日志、数据和代码取证，Script Platform MCP 负责脚本当前态、DEV 调试与经授权的安全保存部署。",
+    "developerName": "Zhenyun Engineering",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "查询并解释目标 Adapter 或 Independent Script 的平台当前版本",
+      "在 DEV 远程调试未保存的 SRM 脚本，但不要自动保存",
+      "帮我排查盘古服务问题并查询相关日志和数据"
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

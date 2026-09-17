@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the contract between custom skills and zhenyun-pangu-mcp tools."""
+"""Validate custom skill contracts against both Zhenyun MCP tool surfaces."""
 from __future__ import annotations
 
 import json
@@ -12,6 +12,7 @@ from pathlib import Path
 SCRIPT_PATH = Path(__file__).resolve()
 MCP_ROOT = SCRIPT_PATH.parents[1]
 WORKSPACE_ROOT = SCRIPT_PATH.parents[2]
+SCRIPT_PLATFORM_ROOT = WORKSPACE_ROOT / "zhenyun-script-platform-mcp"
 SKILLS_ROOT = WORKSPACE_ROOT / "custom-skills"
 FRONTMATTER_NAME = re.compile(r"^name:\s*([^\s]+)\s*$", re.MULTILINE)
 
@@ -25,8 +26,16 @@ def main() -> int:
     # experimental GitLab search in .env. Skills intentionally target the default
     # supported surface where those two tools are not exposed.
     os.environ["GITLAB_SEARCH_ENABLED"] = "false"
+    os.environ["PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS"] = "false"
     sys.path.insert(0, str(MCP_ROOT / "src"))
-    from zhenyun_pangu_mcp import server  # noqa: PLC0415
+    sys.path.insert(0, str(SCRIPT_PLATFORM_ROOT / "src"))
+    from zhenyun_pangu_mcp import server as pangu_server  # noqa: PLC0415
+    from zhenyun_script_platform_mcp import server as script_server  # noqa: PLC0415
+
+    runtime_servers = {
+        "zhenyun-pangu-mcp": pangu_server,
+        "zhenyun-script-platform-mcp": script_server,
+    }
 
     errors = 0
     # The MCP package is the source of truth; the skill copy ships to clients
@@ -36,7 +45,7 @@ def main() -> int:
     if not guide_copy.exists() or guide_copy.read_bytes() != guide_source.read_bytes():
         fail("workflow guide drift: copy packaged workflow_guide.md to zhenyun-ops/references/collaboration-contract.md")
         errors += 1
-    declared_tools: set[str] = set()
+    declared_tools: dict[str, set[str]] = {name: set() for name in runtime_servers}
     skill_names: set[str] = set()
     skill_tool_counts: dict[str, int] = {}
 
@@ -89,14 +98,19 @@ def main() -> int:
             errors += 1
             continue
         for item in servers:
-            if not isinstance(item, dict) or item.get("name") != "zhenyun-pangu-mcp":
+            if not isinstance(item, dict):
+                continue
+            server_name = item.get("name")
+            if server_name not in runtime_servers:
+                fail(f"{expected_name}: unsupported MCP server in manifest: {server_name!r}")
+                errors += 1
                 continue
             tools = item.get("tools")
             if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
-                fail(f"{expected_name}: zhenyun-pangu-mcp tools must be a string list")
+                fail(f"{expected_name}: {server_name} tools must be a string list")
                 errors += 1
                 continue
-            declared_tools.update(tools)
+            declared_tools[server_name].update(tools)
             skill_tool_counts[expected_name] = (
                 skill_tool_counts.get(expected_name, 0) + len(tools)
             )
@@ -126,24 +140,33 @@ def main() -> int:
         )
         errors += 1
 
-    runtime_tools = set(server.mcp._tool_manager._tools)
-    for name, tool in server.mcp._tool_manager._tools.items():
-        if tool.annotations is None or tool.annotations.readOnlyHint is None:
-            fail(f"{name}: missing explicit MCP side-effect annotations")
+    runtime_tool_count = 0
+    for server_name, server in runtime_servers.items():
+        runtime_tools = set(server.mcp._tool_manager._tools)
+        runtime_tool_count += len(runtime_tools)
+        for name, tool in server.mcp._tool_manager._tools.items():
+            if tool.annotations is None or tool.annotations.readOnlyHint is None:
+                fail(f"{server_name}.{name}: missing explicit MCP side-effect annotations")
+                errors += 1
+        missing_tools = sorted(declared_tools[server_name] - runtime_tools)
+        orphan_tools = sorted(runtime_tools - declared_tools[server_name])
+        if missing_tools:
+            fail(
+                f"{server_name}: skill manifests reference unavailable tools: "
+                + ", ".join(missing_tools)
+            )
             errors += 1
-    missing_tools = sorted(declared_tools - runtime_tools)
-    orphan_tools = sorted(runtime_tools - declared_tools)
-    if missing_tools:
-        fail("skill manifests reference unavailable MCP tools: " + ", ".join(missing_tools))
-        errors += 1
-    if orphan_tools:
-        fail("MCP tools have no skill owner: " + ", ".join(orphan_tools))
-        errors += 1
+        if orphan_tools:
+            fail(
+                f"{server_name}: MCP tools have no skill owner: " + ", ".join(orphan_tools)
+            )
+            errors += 1
 
     if errors:
         return 1
     print(
-        f"OK: {len(skill_names)} skills, {len(runtime_tools)} MCP tools, "
+        f"OK: {len(skill_names)} skills, {runtime_tool_count} MCP tools across "
+        f"{len(runtime_servers)} servers, "
         "no missing or orphan skill/tool contracts"
     )
     return 0
