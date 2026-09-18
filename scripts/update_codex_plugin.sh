@@ -35,6 +35,7 @@ done
   cd "${SCRIPT_PLATFORM_ROOT}"
   UV_CACHE_DIR="${SCRIPT_UV_CACHE_DIR_VALUE}" uv run pytest -q
   UV_CACHE_DIR="${SCRIPT_UV_CACHE_DIR_VALUE}" uv run ruff check .
+  UV_CACHE_DIR="${SCRIPT_UV_CACHE_DIR_VALUE}" uv run ruff format --check .
 )
 
 mkdir -p \
@@ -48,7 +49,7 @@ rsync -a --delete --exclude='.DS_Store' --exclude='.git' --exclude='.env' \
   --exclude='*.pyc' --exclude='dist' --exclude='build' --exclude='.mcp.json' \
   "${MCP_ROOT}/" "${PLUGIN_ROOT}/servers/zhenyun-pangu-mcp/"
 rsync -a --delete --exclude='.DS_Store' --exclude='.git' --exclude='.env' \
-  --exclude='.venv' --exclude='.pytest_cache' --exclude='.ruff_cache' \
+  --exclude='.venv' --exclude='.auth' --exclude='.pytest_cache' --exclude='.ruff_cache' \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='dist' --exclude='build' \
   "${SCRIPT_PLATFORM_ROOT}/" "${PLUGIN_ROOT}/servers/zhenyun-script-platform-mcp/"
 cp "${MCP_ROOT}/scripts/plugin.mcp.json" "${PLUGIN_ROOT}/.mcp.json"
@@ -86,7 +87,7 @@ mcp_drift="$(
 )"
 script_mcp_drift="$(
   rsync -ani --delete --exclude='.DS_Store' --exclude='.git' --exclude='.env' \
-    --exclude='.venv' --exclude='.pytest_cache' --exclude='.ruff_cache' \
+    --exclude='.venv' --exclude='.auth' --exclude='.pytest_cache' --exclude='.ruff_cache' \
     --exclude='__pycache__' --exclude='*.pyc' --exclude='dist' --exclude='build' \
     "${SCRIPT_PLATFORM_ROOT}/" "${PLUGIN_ROOT}/servers/zhenyun-script-platform-mcp/"
 )"
@@ -95,7 +96,7 @@ plugin_mcp_drift="$(
 )"
 cache_drift="$(
   rsync -acni --delete --exclude='.DS_Store' --exclude='.git' --exclude='.env' \
-    --exclude='.venv' --exclude='.pytest_cache' --exclude='__pycache__' \
+    --exclude='.venv' --exclude='.auth' --exclude='.pytest_cache' --exclude='__pycache__' \
     --exclude='*.pyc' --exclude='dist' --exclude='build' \
     --exclude='/servers/zhenyun-pangu-mcp/.mcp.json' \
     "${PLUGIN_ROOT}/" "${INSTALLED_PLUGIN_ROOT}/" | awk '$1 !~ /^\.d/'
