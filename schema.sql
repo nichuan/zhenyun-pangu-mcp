@@ -60,7 +60,7 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_docs_status ON knowledge_docs (status);
 -- 注意：pgvector 的 HNSW / IVFFlat 索引均限制最多 2000 维，qwen3-embedding-0.6b 返回 1024 维（低于上限），
 -- 但知识库规模小（数千条），顺序扫描精确余弦检索已足够；若规模上万可再加 hnsw 索引。
 -- 因此此处【不建向量索引】，改用顺序扫描做精确余弦检索（cosine）。知识库规模小（数百条），
--- 顺序扫描性能完全足够，且保留完整 2048 维语义信息。
+-- 顺序扫描性能完全足够，且保留完整 1024 维语义信息。
 -- 若后续换用 ≤2000 维模型并需要 ANN 加速，可改为 hnsw (embedding vector_cosine_ops)。
 
 -- 自动维护 updated_at
@@ -79,7 +79,7 @@ CREATE TRIGGER trg_knowledge_docs_updated_at
 -- ============================================================================
 -- 语义检索 RPC（混合检索的向量召回部分）
 -- 通过 embedding 余弦距离召回相似知识，支持 knowledge_type / system / module 过滤。
--- 向量维度依赖 embedding 列（当前 vector(2048)，随模型变更），调用前需先跑 backfill 生成 embedding。
+-- 向量维度依赖 embedding 列（当前 vector(1024)，随模型变更），调用前需先跑 backfill 生成 embedding。
 -- match_threshold 建议 0.5~0.75；低于阈值的结果会被过滤。
 -- ============================================================================
 DROP FUNCTION IF EXISTS match_knowledge_docs(vector, float, int, text, text, text, text);

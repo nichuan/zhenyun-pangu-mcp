@@ -108,67 +108,6 @@ def _json(value: object) -> str:
 #   - 失败：{"ok": false, "error": {"code": <分类>, "message": <人类可读>, "retryable": <是否可重试>}}
 # 兼容性：保留原有顶层业务字段（results/query/count 等），仅在结构外层补充 ok/meta，
 # 不破坏现有 Skill 对返回的解析。
-_SOURCE_MAP = {
-    "obs_log_query": "loki",
-    "obs_log_trace": "loki",
-    "query_script_trace": "sls",
-    "obs_log_datasources": "loki",
-    "obs_sls_query": "sls",
-    "obs_sls_targets": "sls",
-    "archery_query": "archery",
-    "archery_describe_table": "archery",
-    "archery_list_columns": "archery",
-    "archery_query_tenant": "archery",
-    "archery_list_databases": "archery",
-    "archery_list_instances": "archery",
-    "inspect_object_relation": "archery",
-    "search_adapter_scripts": "adapter-script",
-    "get_adapter_script_info": "adapter-script",
-    "get_adapter_script_source": "adapter-script",
-    "search_adapter_script_source": "adapter-script",
-    "search_standalone_scripts": "standalone-script",
-    "get_standalone_script_info": "standalone-script",
-    "get_standalone_script_source": "standalone-script",
-    "search_standalone_script_source": "standalone-script",
-    "check_marmot_script_static": "local-static-check",
-    "search_repo": "local-repo",
-    "gitlab_search_projects": "gitlab",
-    "gitlab_search_code": "gitlab",
-    "gitlab_get_file": "gitlab",
-    "gitlab_list_tree": "gitlab",
-    "gitlab_list_branches": "gitlab",
-    "search_knowledge": "knowledge-base",
-    "search_sql_templates": "knowledge-base",
-    "search_tables": "knowledge-base",
-    "search_pangu": "knowledge-base",
-    "get_knowledge": "knowledge-base",
-    "get_sql_template": "knowledge-base",
-    "get_table": "knowledge-base",
-    "get_table_relations": "knowledge-base",
-    "diagnose_context": "knowledge-base",
-    "list_sql_templates": "knowledge-base",
-    "save_knowledge": "knowledge-base",
-    "save_sql_template": "knowledge-base",
-    "update_sql_template": "knowledge-base",
-    "delete_sql_template": "knowledge-base",
-    "record_template_usage": "knowledge-base",
-    "add_table_relation": "knowledge-base",
-    "record_table_usage": "knowledge-base",
-    "upsert_table_knowledge": "knowledge-base",
-    "choerodon_list_projects": "choerodon",
-    "choerodon_query_issue": "choerodon",
-    "choerodon_list_issue": "choerodon",
-    "choerodon_search_users": "choerodon",
-    "choerodon_get_status_map": "choerodon",
-    "choerodon_search_tasks_by_person": "choerodon",
-    "choerodon_list_attachments": "choerodon",
-    "choerodon_download_attachment": "choerodon",
-    "choerodon_list_comments": "choerodon",
-    "choerodon_add_comment": "choerodon",
-    "es_search": "elasticsearch",
-    "es_count": "elasticsearch",
-    "es_get": "elasticsearch",
-}
 
 
 def _now_str() -> str:
@@ -344,8 +283,8 @@ def obs_log_query(
         ds_name = loki.resolve_datasource(region, env)
     except loki.LokiError as e:
         return _err("config", str(e), retryable=False)
-    client = loki._get_client(region)
     try:
+        client = loki._get_client(region)
         uid = client.resolve_uid(ds_name)
     except loki.LokiError as e:
         return _err("loki_auth", str(e), retryable=True)
@@ -465,8 +404,8 @@ def obs_log_datasources(region: str = "aws") -> str:
     region_error = _check_loki_region(region)
     if region_error:
         return region_error
-    client = loki._get_client(region)
     try:
+        client = loki._get_client(region)
         ds_list = client.discover_loki_datasources()
     except loki.LokiError as e:
         return _err("loki_auth", str(e), retryable=True)

@@ -34,6 +34,7 @@ READONLY_ENDPOINTS = (
     "_validate",
     "_search_shards",
     "_rank_eval",
+    "_source",
 )
 
 
@@ -41,15 +42,17 @@ def _check_readonly(path: str) -> None:
     """校验请求的 ES 端点是否为只读。
 
     规则：
-    - 拒绝任何含 _delete / _update / _bulk / _create / _doc 写语义的路径。
+    - 拒绝任何含 _delete / _update / _bulk / _create / _doc / _aliases 等写语义的路径。
     - 仅放行 READONLY_ENDPOINTS 中的只读端点。
+    - 必须对「实际发出的路径」逐字校验；禁止对伪造路径放行（旧实现曾借用 _search）。
     """
     p = path.strip().lstrip("/").lower()
 
-    # 显式拒绝写语义关键字
+    # 显式拒绝写语义关键字（双用途端点如 _aliases/_mapping/_settings 一律 fail-closed）
     danger = (
         "_delete", "_update", "_bulk", "_create", "_doc", "_reindex",
-        "_ingest", "_scripts", "_aliases?",
+        "_ingest", "_scripts", "_aliases", "_mapping", "_settings",
+        "_close", "_open", "_forcemerge", "_snapshot", "_rollover",
     )
     for d in danger:
         if d in p:
@@ -192,7 +195,7 @@ class ESClient:
     def get(self, index: str, doc_id: str) -> dict:
         """按 _id 获取单个文档（只读，用 _source 端点规避写语义拦截）。"""
         path = f"{index}/_source/{doc_id}"
-        _check_readonly(f"{index}/_search")  # 借用只读校验
+        _check_readonly(path)  # 校验实际请求路径（_source 已列入只读白名单）
         url = urljoin(self.base_url + "/", path)
         try:
             resp = self.session.get(url, auth=self.auth,

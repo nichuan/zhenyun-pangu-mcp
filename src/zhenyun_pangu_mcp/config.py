@@ -122,7 +122,7 @@ CHOERODON_TOKEN_CACHE = os.getenv("CHOERODON_TOKEN_CACHE") or str(Path.home() / 
 # GitLab 代码平台(整合自 gitlab-code-mcp;token 优先,缺失回退用户名密码)
 # 默认指向云原生 SRM 仓库网关
 # ---------------------------------------------------------------------------
-GITLAB_BASE_URL = os.getenv("GITLAB_BASE_URL", "https://code.choerodon.com.cn")
+GITLAB_BASE_URL = os.getenv("GITLAB_BASE_URL", "https://open-gitlab.going-link.com")
 GITLAB_TOKEN = os.getenv("GITLAB_TOKEN", "")
 GITLAB_USERNAME = os.getenv("GITLAB_USERNAME", "")
 GITLAB_PASSWORD = os.getenv("GITLAB_PASSWORD", "")
