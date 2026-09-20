@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "甄云盘古工具集",
     "shortDescription": "盘古事实查询与 SRM 脚本/配置平台工具",
-    "longDescription": "整合甄云 SRM 排障、SQL、Archery、GitLab、猪齿鱼等 Skills，并明确分工：盘古 MCP 负责发现、日志、数据和代码取证，Script Platform MCP 负责自动认证、脚本与配置当前态、DEV 调试，以及两阶段人工确认后的安全 CRUD、动作、保存和部署。",
+    "longDescription": "整合甄云 SRM 需求交付、排障、SQL、Archery、GitLab、猪齿鱼等 Skills，并明确分工：盘古 MCP 负责发现、日志、数据和代码取证，Script Platform MCP 负责按需求号发现历史资产、脚本与配置当前态、DEV 调试，以及两阶段人工确认后的安全 CRUD、动作、保存和部署。",
     "developerName": "Zhenyun Engineering",
     "category": "Developer Tools",
     "capabilities": [
@@ -29,6 +29,8 @@
       "Write"
     ],
     "defaultPrompt": [
+      "按平台资源类型整理一个 SRM 需求的 Adapter、Independent、Block、Constant 和关系配置交付产物",
+      "按历史需求号定位关联的 Adapter、Independent Script、CodeBlock、QueryBlock 和 API 资源",
       "查询并解释目标 Adapter 或 Independent Script 的平台当前版本",
       "查询目标租户的 API、消费端、调度、常量、OutBound、CodeBlock 或 QueryBlock 配置",
       "在 DEV 远程调试未保存的 SRM 脚本，但不要自动保存",
