@@ -22,6 +22,7 @@ def test_archery_list_instances_filters_by_site():
 
     assert set(all_sites["instances_by_site"]) == {"cn", "aws"}
     assert set(aws_only["instances_by_site"]) == {"aws"}
+    assert set(aws_only["instances_by_site"]["aws"]) == {"aws"}
     assert aws_only["requested_site"] == "aws"
 
 
@@ -30,6 +31,15 @@ def test_archery_list_instances_rejects_unknown_site():
 
     assert result["ok"] is False
     assert result["error"]["code"] == "archery_instance_site"
+
+
+def test_archery_query_tenant_rejects_empty_tenant_before_backend_access():
+    result = json.loads(server.archery_query_tenant())
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "archery_query_tenant"
+    assert result["error"]["retryable"] is False
+    assert "tenant 必填" in result["error"]["message"]
 
 
 def test_conditional_required_fields_are_advertised_in_tool_schemas():

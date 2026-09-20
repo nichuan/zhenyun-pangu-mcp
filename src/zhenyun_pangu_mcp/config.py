@@ -50,7 +50,7 @@ ARCHERY_CREDENTIALS = {
 # 关键：aws 实例只属于 aws 站点，cn 实例只属于 cn 站点。调用方必须显式传 site，
 # 否则会因「用 cn 站点去查 aws 实例」而报「未关联该实例」的歧义错误。
 # 默认映射为真实实例名;可用 ARCHERY_DB_* 覆盖,或用 ARCHERY_INSTANCE_ALIASES(JSON) 整体覆盖。
-# aws 站点当前只有一个正式环境:JP-SaaS-1-Prod-RW-8.0(库 srm)。
+# aws 站点当前只有一个正式环境:JP-SaaS-1-Prod-RW-8.0(库 srm)，没有独立只读别名。
 ARCHERY_INSTANCE_ALIASES = {
     "cn": {
         "prod": os.getenv("ARCHERY_DB_CN", "SAAS-SRM-PROD数据库"),
@@ -60,7 +60,6 @@ ARCHERY_INSTANCE_ALIASES = {
     },
     "aws": {
         "aws": os.getenv("ARCHERY_DB_AWS", "JP-SaaS-1-Prod-RW-8.0"),
-        "aws-prod": os.getenv("ARCHERY_DB_AWS_RO", "JP-SaaS-1-Prod-RW-8.0"),
     },
 }
 # 允许 .env 整体覆盖别名映射(JSON, 结构需为 {"cn": {...}, "aws": {...}})

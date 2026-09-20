@@ -47,6 +47,13 @@ _UNSUPPORTED_SQL_TOKENS = (
     "dumpfile", "for", "lock", "case", "when", "then", "else", "end",
 )
 
+# Parentheses are allowed only for deterministic, read-only scalar functions.
+# Every other parenthesized construct remains rejected, including subqueries.
+_SAFE_SQL_FUNCTIONS = frozenset({
+    "count", "sum", "avg", "min", "max", "ifnull", "nullif",
+    "concat", "concat_ws", "cast",
+})
+
 
 def _sql_code(sql: str) -> str:
     """返回 SQL 的非字符串部分，同时拒绝注释和多语句。
@@ -58,6 +65,7 @@ def _sql_code(sql: str) -> str:
         raise ArcheryError("SQL 不能为空")
 
     code: list[str] = []
+    function_parens: list[str] = []
     i = 0
     n = len(sql)
     while i < n:
@@ -94,10 +102,30 @@ def _sql_code(sql: str) -> str:
             code.append(" ")
             i += 1
             continue
-        if ch in "()":
-            raise ArcheryError("仅支持基础只读 SQL，不支持函数、子查询或窗口表达式")
+        if ch == "(":
+            # A function name must be immediately adjacent to the opening
+            # parenthesis; whitespace before '(' is intentionally rejected.
+            match = re.search(r"([A-Za-z_][A-Za-z0-9_$]*)$", "".join(code))
+            function_name = match.group(1).lower() if match else ""
+            if function_name not in _SAFE_SQL_FUNCTIONS:
+                raise ArcheryError(
+                    "仅允许白名单无副作用函数调用，不支持子查询或其它括号结构"
+                )
+            function_parens.append(function_name)
+            code.append(ch)
+            i += 1
+            continue
+        if ch == ")":
+            if not function_parens:
+                raise ArcheryError("括号结构不受支持；仅允许白名单无副作用函数调用")
+            function_parens.pop()
+            code.append(ch)
+            i += 1
+            continue
         code.append(ch)
         i += 1
+    if function_parens:
+        raise ArcheryError("SQL 包含未闭合的函数括号")
     return "".join(code)
 
 
@@ -106,7 +134,7 @@ def validate_select_sql(sql: str) -> None:
 
     允许基础 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE；SELECT 支持常见的
     列/表/WHERE/ORDER BY/GROUP BY/LIMIT 等语法。不允许 CTE、集合运算、窗口函数、
-    函数/子查询括号、DDL/DML、注释和多语句。
+    仅允许白名单无副作用函数括号；其余函数/括号、子查询、DDL/DML、注释和多语句均拒绝。
 
     函数名保留为历史名称，调用方无需修改。
     """
@@ -133,6 +161,12 @@ def validate_select_sql(sql: str) -> None:
 
     # EXPLAIN 只允许解释 SELECT，不能借此包装 UPDATE/DELETE 等写操作。
     statement = normalized[len("explain ") :] if is_explain_select else normalized
+    # A SELECT token after the outer statement start would be a subquery or
+    # malformed function argument; neither is part of the safe grammar.
+    if re.search(r"\bselect\b", statement[len("select") :]):
+        raise ArcheryError(
+            "不支持子查询；仅允许外层基础 SELECT 与白名单无副作用函数"
+        )
     for token in _UNSUPPORTED_SQL_TOKENS:
         if re.search(rf"\b{token}\b", statement):
             raise ArcheryError(
@@ -408,20 +442,19 @@ def _client(site: str) -> ArcheryClient:
 
 def query_tenant(site: str, tenant: str | None, instance_name: str, db_name: str) -> dict:
     """查询 hpfm_tenant 租户信息。"""
+    if not tenant or not tenant.strip():
+        raise ArcheryError("tenant 必填：请传租户编码或名称，不支持空参列举租户")
     client = _client(site)
-    if tenant:
-        tenant = tenant.strip()
-        # 该能力的 SQL 由服务端内部拼接，租户号/名称只接受常见业务编码字符，
-        # 避免引号、注释和控制字符改变查询语义。
-        if not re.fullmatch(r"[\w .:/-]{1,100}", tenant, flags=re.UNICODE):
-            raise ArcheryError("tenant 仅允许字母、数字、空格及 . : / - _ 字符")
-        escaped = tenant.replace("\\", "\\\\").replace("'", "''")
-        sql = (
-            f"SELECT tenant_id, tenant_num, tenant_name, enabled_flag "
-            f"FROM hpfm_tenant WHERE tenant_num = '{escaped}' OR tenant_name LIKE '%{escaped}%' LIMIT 50"
-        )
-    else:
-        sql = "SELECT tenant_id, tenant_num, tenant_name, enabled_flag FROM hpfm_tenant LIMIT 100"
+    tenant = tenant.strip()
+    # 该能力的 SQL 由服务端内部拼接，租户号/名称只接受常见业务编码字符，
+    # 避免引号、注释和控制字符改变查询语义。
+    if not re.fullmatch(r"[\w .:/-]{1,100}", tenant, flags=re.UNICODE):
+        raise ArcheryError("tenant 仅允许字母、数字、空格及 . : / - _ 字符")
+    escaped = tenant.replace("\\", "\\\\").replace("'", "''")
+    sql = (
+        f"SELECT tenant_id, tenant_num, tenant_name, enabled_flag "
+        f"FROM hpfm_tenant WHERE tenant_num = '{escaped}' OR tenant_name LIKE '%{escaped}%' LIMIT 50"
+    )
     return client.query(sql, instance_name, db_name, 100)
 
 

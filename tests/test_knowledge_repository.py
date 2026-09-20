@@ -31,6 +31,28 @@ def test_template_keyword_search_uses_ranked_rpc(monkeypatch):
     })]
 
 
+def test_template_keyword_search_keeps_server_side_matches_beyond_client_window(monkeypatch):
+    def fake_rpc(function, payload):
+        assert function == "search_sql_templates_keyword"
+        assert payload["match_count"] == 1
+        # This represents a match ranked after the first unmatching row in the
+        # table; the RPC filters and ranks before applying its own LIMIT.
+        return [{"id": 99, "title": "窗口外仍命中的订单模板"}]
+
+    monkeypatch.setattr(repo.sb, "rpc", fake_rpc)
+    monkeypatch.setattr(
+        repo.sb,
+        "query_table",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("keyword search must not fetch a client-side limit window")
+        ),
+    )
+
+    assert repo.search_templates_keyword("订单", limit=1) == [
+        {"id": 99, "title": "窗口外仍命中的订单模板"}
+    ]
+
+
 def test_template_keyword_search_legacy_fallback_scans_more_than_limit(monkeypatch):
     def unavailable(*_args, **_kwargs):
         raise RuntimeError("old schema")

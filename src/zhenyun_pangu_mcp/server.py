@@ -261,19 +261,7 @@ def obs_log_query(
     limit: int = 50,
     direction: str = "BACKWARD",
 ) -> str:
-    """查询 Loki 日志（仅 AWS 海外 jp-saas-1；国内盘古请改用 obs_sls_query）。
-
-    适用范围：region=aws（AWS 海外 jp-saas-1，prod/nonprod/ops 全环境）。
-    ⚠️ 国内公有云(cn)盘古日志（prod/dev/test）已迁回阿里云 SLS，本工具不再支持
-    region=cn；查国内盘古请用 obs_sls_query(environment="prod"/"dev"/"test")。
-
-    query 为 LogQL 表达式，如 '{app="srm-gateway"} |= "403"'。
-    time_range 支持 30m/2h/1d、今天/昨天/本周 或 "YYYY-MM-DD HH:mm~HH:mm"（北京时间）。
-
-    注：MCP 直接调 Loki HTTP API，query 即 LogQL 字符串；与「用户手册」在
-    Grafana 页面手工选 namespace/app 缩小范围不同，这里必须在 query 中显式写
-    标签过滤（如 {namespace="..."}），否则将扫描全部数据流（见 warning）。
-    """
+    """查询 AWS 海外 Loki 日志；国内盘古改用 obs_sls_query，时间窗与结果有界，返回 JSON ok 或 error.retryable。"""
     region_error = _check_loki_region(region)
     if region_error:
         return region_error
@@ -341,25 +329,7 @@ def obs_log_trace(
     level: str = "all",
     clip_len: int = 600,
 ) -> str:
-    """按 traceId 查整条调用链日志（Loki，仅 AWS 海外；国内盘古用 obs_sls_query）。
-
-    ⚠️ 国内公有云(cn)盘古日志（prod/dev/test）已迁回阿里云 SLS，本工具不再支持
-    region=cn；查国内盘古链路请用 obs_sls_query(trace_id=..., environment=...)。
-
-    推荐优先用本工具替代 obs_log_query+手写 query 来追链路，自动处理：
-    按正文子串匹配 traceId（覆盖 `[xxx]` / `traceId=xxx` / `trace_id: xxx`，
-    不写死字段前缀），带 namespace 限定取全链路按时间排序还原调用链；带 ns 查
-    为 0 时自动降级为不限 namespace 重查一次。ERROR/WARN 行已包含在结果中，
-    meta.error_count / warn_count 给出数量，无需单独再查。
-    防 TOKEN 膨胀：
-    - level：all（默认，全量）/ error（仅 ERROR 级）/ warn（WARN+ERROR 级）。
-      排障时建议先用 level=error 或 level=warn 只取异常行，能省 80%+ token。
-    - clip_len：每条日志行内容截断长度（默认 600，可调小到 200 更省 token）。
-    - meta.truncated：命中行数达到 limit 时为 true，提示结果可能被截断，可调大 limit。
-    默认 region=aws, env=nonprod；env 取值以 obs_log_datasources(region) 返回的
-    真实数据源键为准（aws 下为 prod/nonprod/ops）。
-    direction：BACKWARD（默认，从最近往回，先看最新）| FORWARD（从最早开始）。
-    """
+    """按 traceId 查询 AWS 海外 Loki 调用链；国内盘古改用 obs_sls_query，返回裁剪后的时间线与 JSON ok/error.retryable。"""
     region_error = _check_loki_region(region)
     if region_error:
         return region_error
@@ -395,12 +365,7 @@ def obs_log_trace(
 
 @_tool()
 def obs_log_datasources(region: str = "aws") -> str:
-    """列出指定日志平台的 Loki 数据源（只读，仅 AWS 海外）。
-
-    何时调用：不知道 ``env`` 对应的数据源名称，或需要确认 aws 平台连通性时；
-    返回真实 datasource 名称，不需要手工猜测或把 Grafana 页面名称写进 LogQL。
-    ⚠️ 国内公有云盘古日志已迁回阿里云 SLS（prod/dev/test 全覆盖），无 cn 数据源。
-    """
+    """列出 AWS 海外 Loki 数据源；只读，返回 JSON ok 或 error.retryable。"""
     region_error = _check_loki_region(region)
     if region_error:
         return region_error
@@ -432,12 +397,7 @@ def archery_query(
     db: str | None = None,
     limit: int = 100,
 ) -> str:
-    """执行 SQL 查询（只读）。
-
-    site=cn 国内 / aws 日本云。instance 可用别名：prod/prod-ro/dev/test。
-    db 默认 srm。用户 SQL 仅允许单条基础 SELECT、EXPLAIN SELECT 或 SHOW CREATE TABLE；
-    不支持其它 SHOW/DESC、WITH、多语句、注释、函数/子查询、窗口函数、集合运算或任何写入语法。
-    """
+    """执行 Archery 只读 SQL；site 必须为 cn/aws，允许单条 SELECT/EXPLAIN SELECT/SHOW CREATE TABLE 及白名单无副作用函数，拒绝子查询、窗口、多语句、注释和写入。"""
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
@@ -455,11 +415,7 @@ def archery_describe_table(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """获取当前数据库表结构（只读，底层为 SHOW CREATE TABLE）。
-
-    何时调用：表名已确定但字段、类型、索引或注释不确定时；生成查询/修复 SQL
-    前优先使用本工具确认实时 DDL。它查询真实数据库，不依赖知识库目录。
-    """
+    """读取 Archery 实时 SHOW CREATE TABLE 结构；只读，返回 JSON ok 或 error.retryable。"""
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
@@ -477,11 +433,7 @@ def archery_list_columns(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """获取当前数据库表的字段名列表（只读）。
-
-    何时调用：只需快速校验字段是否存在，或生成 WHERE/JOIN/修复 SQL 前核对拼写时；
-    需要完整类型、索引和注释时改用 archery_describe_table。
-    """
+    """读取 Archery 实时字段名；只读，返回 JSON ok 或 error.retryable。"""
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
@@ -499,12 +451,9 @@ def archery_query_tenant(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """查询租户信息（hpfm_tenant）。tenant 为空时列出前 100 个租户。
-
-    盘古专属能力：多租户查询。
-    site=cn 国内 / aws 日本云(JP-SaaS-1)。instance 可用别名：
-    cn: prod/prod-ro/dev/test；aws: aws(=aws-prod, 正式环境 JP-SaaS-1-Prod-RW-8.0)。
-    """
+    """按必填 tenant 查询 hpfm_tenant 的租户信息；site 必须为 cn/aws，空参返回参数错误，不执行全表列举。"""
+    if not tenant or not tenant.strip():
+        return _err("archery_query_tenant", "tenant 必填：请传租户编码或名称，不支持空参列举租户")
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
@@ -519,11 +468,7 @@ def archery_list_databases(
     site: str = "cn",
     instance: str | None = None,
 ) -> str:
-    """列出指定 Archery 实例下的数据库（只读）。
-
-    何时调用：不确定使用 ``srm``、``srm_logistics_delivery`` 等库，或跨库查询前；
-    这是固定的内部发现能力，不等于 archery_query 对用户开放了任意 SHOW 语句。
-    """
+    """列出指定 Archery 实例数据库；这是固定只读发现能力，不开放任意 SHOW，返回 JSON ok 或 error.retryable。"""
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         result = archery.query_db_list(site, instance_name)
@@ -534,12 +479,7 @@ def archery_list_databases(
 
 @_tool()
 def archery_list_instances(site: Literal["", "cn", "aws"] = "") -> str:
-    """列出 Archery 实例别名映射（短名 -> 真实实例名，按站点分组）。
-
-    ``site`` 为空时返回全部站点；传 ``cn`` 或 ``aws`` 时只返回该站点。
-    返回结构明确标注每个别名归属的 site，调用方据此在后续查询中显式传
-    site，避免「用 cn 站点查 aws 实例」导致的「未关联该实例」歧义错误。
-    """
+    """列出按 site 分组的 Archery 实例别名；只读，调用后按返回值传 site，返回 JSON ok 或 error.retryable。"""
     selected = site.strip().lower()
     if selected and selected not in ARCHERY_INSTANCE_ALIASES:
         return _err(
@@ -586,12 +526,7 @@ def inspect_object_relation(
     db: str | None = None,
     sample_limit: int = 5,
 ) -> str:
-    """核验两个数据库对象的字段、关联条件和少量真实样例（只读）。
-
-    该工具用于需求开发编码前的字段来源分析：先从实时数据库确认两端字段是否
-    存在，再在字段存在时执行一个受限 JOIN 样例。它不会推断不存在的字段；若
-    字段缺失，返回推荐查询和明确的 ``field_exists=false``，供 Skill 停止猜测。
-    """
+    """核验两个数据库对象的字段、关联条件和受限样例；只读，缺字段时返回 field_exists=false 与 JSON error.retryable。"""
     try:
         source_object = _validate_db_identifier(source_object, "source_object")
         source_field = _validate_db_identifier(source_field, "source_field")
@@ -678,24 +613,13 @@ def _choerodon_call(dispatch_name: str, **kwargs) -> str:
 
 @_tool()
 def choerodon_list_projects(keyword: str = "", size: int = 100) -> str:
-    """列出或搜索当前账号可访问的猪齿鱼项目（只读）。
-
-    keyword 可传项目 ID、名称或编码；为空时列出项目。返回的 projectId
-    应显式传给后续的 choerodon_list_issue / query_issue / search_users /
-    get_status_map / list_comments / list_attachments 等项目级工具。
-    """
+    """列出或搜索当前账号可访问的猪齿鱼项目；只读，返回真实 projectId 与 JSON ok/error.retryable。"""
     return _choerodon_call("list_projects", keyword=keyword, size=size)
 
 
 @_tool()
 def choerodon_query_issue(issue_id: str, project_id: str = "") -> str:
-    """查询猪齿鱼单个任务/缺陷详情（含附件列表）。
-
-    issue_id 为工单加密 ID（来自列表结果）；project_id 可传任意可访问
-    项目的真实 ID，为空时默认用 CHOERODON_PROJECT_ID=58。
-    返回 issueNum/完整编号 fullIssueNum(如 prod-bug-213849)/租户编码 tenantCode/项目编码 projectCode/
-    summary/状态/优先级/类型/创建人/描述(HTML)/附件。
-    """
+    """按真实加密 issue_id 查询猪齿鱼任务详情；只读，返回 JSON ok 或 error.retryable。"""
     return _choerodon_call("query_issue", issue_id=issue_id, project_id=project_id or None)
 
 
@@ -707,12 +631,7 @@ def choerodon_list_issue(
     size: int = 20,
     project_id: str = "",
 ) -> str:
-    """条件查询猪齿鱼任务列表。
-
-    keyword 为概要/任务编号模糊搜索；assignee 为经办人姓名（自动解析成员）；
-    status 为状态名（自动解析状态 id）。project_id 可传任意可访问项目的
-    真实 ID，为空时默认 58。返回任务摘要及其 projectId。
-    """
+    """按关键词、经办人或状态查询猪齿鱼任务；只读，返回 JSON ok 或 error.retryable。"""
     return _choerodon_call(
         "list_issue", keyword=keyword, assignee=assignee, status=status,
         size=size, project_id=project_id or None,
@@ -721,64 +640,43 @@ def choerodon_list_issue(
 
 @_tool()
 def choerodon_search_users(name: str, size: int = 50, project_id: str = "") -> str:
-    """按姓名/登录名搜索猪齿鱼项目成员（只读）。
-
-    何时调用：按经办人筛选任务前确认真实成员，或需要把用户输入转换为猪齿鱼成员
-    id 时；返回的真实 id/姓名再交给任务查询工具，不要自行编造 id。
-    """
+    """搜索猪齿鱼项目成员并返回真实用户 id；只读，返回 JSON ok 或 error.retryable。"""
     return _choerodon_call("search_users", name=name, size=size, project_id=project_id or None)
 
 
 @_tool()
 def choerodon_get_status_map(project_id: str = "") -> str:
-    """获取猪齿鱼项目状态映射（状态名 -> 加密 id），供列表过滤用。"""
+    """读取猪齿鱼项目状态名到加密 id 的映射；只读，返回 JSON ok 或 error.retryable。"""
     return _choerodon_call("get_status_map", project_id=project_id or None)
 
 
 @_tool()
 def choerodon_search_tasks_by_person(name: str, size: int = 50, project_id: str = "") -> str:
-    """按经办人姓名搜索其负责的猪齿鱼任务（先查成员再按经办人过滤）。"""
+    """按经办人查询猪齿鱼任务；只读，返回 JSON ok 或 error.retryable。"""
     return _choerodon_call("search_tasks_by_person", name=name, size=size, project_id=project_id or None)
 
 
 @_tool()
 def choerodon_list_attachments(issue_id: str, project_id: str = "") -> str:
-    """查看猪齿鱼任务的附件列表（文件名 + URL）。"""
+    """列出猪齿鱼任务附件；只读，返回 JSON ok 或 error.retryable。"""
     return _choerodon_call("list_attachments", issue_id=issue_id, project_id=project_id or None)
 
 
 @_tool()
 def choerodon_download_attachment(file_url: str) -> str:
-    """通过猪齿鱼 hfle 接口获取附件签名下载地址（只读）。
-
-    何时调用：用户明确要求下载某个附件时；必须先用 choerodon_list_attachments
-    获得真实 ``file_url``，本工具不接受凭空构造的 attachment id，也不会把文件内容
-    上传或写回猪齿鱼。
-    """
+    """按真实 file_url 获取猪齿鱼附件签名地址；只读，不上传或回写文件，返回 JSON ok/error.retryable。"""
     return _choerodon_call("download_attachment", file_url=file_url)
 
 
 @_tool()
 def choerodon_list_comments(issue_id: str, size: int = 100, project_id: str = "") -> str:
-    """查询猪齿鱼任务的评论列表（只读）。
-
-    issue_id 为工单加密 ID（与 choerodon_query_issue 一致）。
-    返回每条评论的作者/登录名/内容/更新时间。写评论前先看现状。
-    """
+    """读取猪齿鱼任务评论；只读，写评论使用独立的确认边界，返回 JSON ok 或 error.retryable。"""
     return _choerodon_call("list_comments", issue_id=issue_id, size=size, project_id=project_id or None)
 
 
 @_tool()
 def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> str:
-    """为猪齿鱼任务新增评论（写操作，有副作用）。
-
-    issue_id 为工单加密 ID；comment 必须是规范 Markdown（标题/列表/引用/代码块/
-    加粗/行内代码等），不接受纯文本或原始 HTML；工具会将 Markdown 渲染为评论区 HTML。
-    猪齿鱼评论区是富文本容器，为稳妥展示请优先使用「加粗段落 + 无序/有序列表」，
-    少用 Markdown 表格、多级标题与引用块。
-    ⚠️ 写操作：会真实写入猪齿鱼，调用前必须向用户确认评论内容无误。
-    建议先调用 choerodon_list_comments 查看现状，再执行写入。
-    """
+    """向猪齿鱼写入规范 Markdown 评论；真实副作用，必须先确认内容，返回 JSON ok 或 error.retryable。"""
     return _choerodon_call("create_comment", issue_id=issue_id, comment=comment, project_id=project_id or None)
 
 
@@ -794,12 +692,7 @@ def search_repo(
     context: int = 2,
     depth: int = 4,
 ) -> str:
-    """跨本地代码仓库搜索（内容 / 文件名 / 模块结构）。
-
-    mode: content(内容搜索,返回命中行与上下文) / filename(文件名模糊匹配) / modules(列出服务-模块-层结构)。
-    扫描根目录由 PG_ROOT 指定(默认本仓库根)。max_results 限制命中数量,
-    context 为内容搜索上下文行数,depth 为递归深度。
-    """
+    """在 PG_ROOT 范围内搜索本地代码内容、文件名或模块；只读且有界，返回 JSON ok 或 error.retryable。"""
     try:
         return _ok(search.search_repo(
             keyword, mode=mode, max_results=max_results,
@@ -824,14 +717,7 @@ def search_adapter_scripts(
     db: str | None = None,
     limit: int = 20,
 ) -> str:
-    """检索租户二开、适配器和外部接口脚本元信息（只读，不返回脚本正文）。
-
-    二开、客户定制、ERP/WMS/OA 对接、回调、推送、同步、报文或字段映射问题，
-    应优先调用本工具发现脚本身份，而不是只搜索本地 Java。tenant/running_service/query
-    至少提供一项；``query`` 匹配 task_code/description。取得唯一精确的 tenant、task_code、
-    running_service 后，必须改用 zhenyun-script-platform-mcp 的 adapter_get 读取平台当前
-    Header、Lines、源码、版本和启用状态。本工具结果不作为 Debug/Deploy 的源码依据。
-    """
+    """发现适配器脚本身份而不返回正文；tenant、running_service、query 至少一项，当前源码须回到 Script Platform MCP。"""
     if not any(value.strip() for value in (tenant, running_service, query)):
         raise ValueError("tenant、running_service、query 至少提供一项非空值")
     try:
@@ -864,11 +750,7 @@ def get_adapter_script_info(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """读取适配器脚本轻量元信息（只读，不读取或返回 Base64 正文）。
-
-    返回租户、运行服务、task_code、版本、优先级和缓存状态。只有源码已在缓存中
-    时才附带 decoded size/hash，避免为了 info 无条件读取完整脚本。
-    """
+    """读取适配器脚本轻量元信息；只读且不返回 Base64 正文，返回 JSON ok 或 error.retryable。"""
     try:
         return _ok(adapter_scripts.service.get_info(
             script_id, site=site, instance=instance, db=db,
@@ -889,12 +771,7 @@ def get_adapter_script_source(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """读取服务端已解码的 JavaScript 源码（只读，永不返回 Base64）。
-
-    默认从 start_line 起返回 200 行，单次局部读取最多 500 行；同时传 start/end
-    可精确读取区间。只有确实需要全局分析时才设置 ``full=true``，定位字段、函数、
-    API 或错误时应先调用 search_adapter_script_source。
-    """
+    """读取已解码的适配器源码局部或全文；只读、有界且不返回 Base64，返回 JSON ok 或 error.retryable。"""
     try:
         return _ok(adapter_scripts.service.get_source(
             script_id,
@@ -923,12 +800,7 @@ def search_adapter_script_source(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """在服务端解码后的 JavaScript 中搜索并返回少量上下文（只读）。
-
-    适合定位字段、函数、接口地址、回调、报文映射或异常文本。默认按普通字符串、
-    不区分大小写搜索；除非确有需要，不要启用 regex。搜索结果只包含匹配区间，
-    不返回 Base64，也不默认返回完整脚本。
-    """
+    """在已解码的适配器源码中搜索少量上下文；只读，不返回 Base64 或默认全文。"""
     try:
         return _ok(adapter_scripts.service.search_source(
             script_id,
@@ -960,16 +832,7 @@ def search_standalone_scripts(
     db: str | None = None,
     limit: int = 20,
 ) -> str:
-    """检索独立脚本（Marmot 脚本库）元信息（只读，不返回脚本正文）。
-
-    独立脚本与适配器埋点脚本（search_adapter_scripts）是两套体系：独立脚本
-    存于 rel-table 宽表 ``spfm_rel_table_record``（table_code=marmot_script_library），
-    无独立物理表；租户编码在 value2 槽位（tenant_id 恒为 0，勿按 tenant_id 过滤）。
-    适用于定时任务、打印模板、导入、消息提醒等非挂钩点二开脚本。
-    tenant/query 至少提供一项；``query`` 匹配脚本编码/描述。取得唯一精确的 tenant 和 code
-    后，必须改用 zhenyun-script-platform-mcp 的 independent_script_get 读取平台当前 Record、
-    源码、版本和 Fixture。本工具结果不作为 Debug/Save 的源码依据。
-    """
+    """发现独立脚本身份而不返回正文；tenant 或 query 至少一项，当前源码须回到 Script Platform MCP。"""
     if not any(value.strip() for value in (tenant, query)):
         raise ValueError("tenant、query 至少提供一项非空值")
     try:
@@ -998,11 +861,7 @@ def get_standalone_script_info(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """读取独立脚本轻量元信息（只读，不读取或返回 Base64 正文）。
-
-    返回租户（value2）、脚本编码（value3）、描述（value4）、内容类型与更新时间。
-    只有源码已在缓存中时才附带 decoded size/hash。
-    """
+    """读取独立脚本轻量元信息；只读且不返回 Base64 正文，返回 JSON ok 或 error.retryable。"""
     try:
         return _ok(standalone_scripts.service.get_info(
             script_id, site=site, instance=instance, db=db,
@@ -1023,14 +882,7 @@ def get_standalone_script_source(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """读取服务端已解码的独立脚本源码/模板正文（只读，永不返回 Base64）。
-
-    正文只取 longValue5（content），longValue1 是测试用例，禁止回退到其它槽位。
-    支持明文源码及历史 Base64（自动探测 UTF-16LE/UTF-16BE/UTF-8）；源码为空返回空正文。
-    默认从 start_line 起返回 200 行，单次局部读取最多 500 行；只有确实需要全局
-    分析时才设置 ``full=true``，定位字段、函数或报文时应先调用
-    search_standalone_script_source。
-    """
+    """读取独立脚本 longValue5 解码后的正文；只读、有界且不返回 Base64，返回 JSON ok 或 error.retryable。"""
     try:
         return _ok(standalone_scripts.service.get_source(
             script_id,
@@ -1059,13 +911,7 @@ def search_standalone_script_source(
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """在服务端解码后的独立脚本中搜索并返回少量上下文（只读）。
-
-    只搜索 longValue5（content）源码，不搜索 longValue1 测试用例。
-    适合定位字段、函数、接口地址、报文映射或异常文本。默认按普通字符串、
-    不区分大小写搜索；除非确有需要，不要启用 regex。搜索结果只包含匹配区间，
-    不返回 Base64，也不默认返回完整脚本。
-    """
+    """在独立脚本 longValue5 源码中搜索少量上下文；只读，不返回测试用例或默认全文。"""
     try:
         return _ok(standalone_scripts.service.search_source(
             script_id,
@@ -1092,12 +938,7 @@ def check_marmot_script_static(
     expected_sha256: str = "",
     artifact_sha256: str = "",
 ) -> str:
-    """对 Marmot JavaScript 做本地静态门禁检查（不执行脚本）。
-
-    固定检查单一 process 入口和运行时禁用项；需求特有的数字 ID、禁止直取字段、
-    外部服务参数、对象结构、常量、日志阶段和全量分页规则通过 ``rules_json`` 传入。
-    MCP 不内置任何租户、表、字段、状态或服务规则。
-    """
+    """对 Marmot JavaScript 做本地静态门禁检查；不执行脚本，规则由 rules_json 提供，返回 JSON ok 或 error.retryable。"""
     try:
         result = delivery_quality.static_check_script(
             source,
@@ -1117,11 +958,7 @@ def check_marmot_script_static(
 
 @_tool()
 def gitlab_search_projects(query: str, per_page: int = 20) -> str:
-    """搜索 GitLab 项目（默认禁用；仅平台明确启用搜索后注册）。
-
-    何时调用：不知道仓库的 project_id/path，或需要先确认标准库与二开库归属时；
-    返回项目 id、完整路径、默认分支和网页地址，后续交给其它 gitlab_* 工具。
-    """
+    """搜索 GitLab 项目；仅在配置显式启用时注册，默认不暴露，返回 JSON ok 或 error.retryable。"""
     if not GITLAB_SEARCH_ENABLED:
         return _err(
             "capability_disabled",
@@ -1148,11 +985,7 @@ def gitlab_search_projects(query: str, per_page: int = 20) -> str:
 
 @_tool()
 def gitlab_search_code(query: str, per_page: int = 20) -> str:
-    """GitLab 代码搜索（默认禁用；仅平台明确启用搜索后注册）。
-
-    何时调用：知道类名、方法名、错误文本或配置键但不知道文件位置时；返回命中
-    项目、路径、分支和行号，随后用 gitlab_get_file 读取完整文件核对上下文。
-    """
+    """搜索 GitLab 代码；仅在配置显式启用时注册，默认不暴露，返回 JSON ok 或 error.retryable。"""
     if not GITLAB_SEARCH_ENABLED:
         return _err(
             "capability_disabled",
@@ -1188,12 +1021,7 @@ if not GITLAB_SEARCH_ENABLED:
 
 @_tool()
 def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
-    """读取 GitLab 仓库指定分支/引用下的完整文件（只读）。
-
-    何时调用：用户/可靠证据已给出精确位置，或 gitlab_list_tree 已在已知项目内定位
-    文件后，需要完整源码、配置或版本上下文时；``project_id``、``path``、``ref``
-    必须来自真实证据，不能通过枚举模拟当前禁用的 GitLab 搜索。
-    """
+    """读取已知 GitLab project/ref/path 的文件；只读，不用枚举绕过搜索禁用，返回 JSON ok 或 error.retryable。"""
     try:
         content = gitlab.GitLabClient().get_file(project_id, path, ref=ref)
         return _ok({"project_id": project_id, "path": path, "ref": ref, "content": content}, "gitlab")
@@ -1209,11 +1037,7 @@ def gitlab_list_tree(
     recursive: bool = False,
     per_page: int = 100,
 ) -> str:
-    """列出 GitLab 仓库目录树（只读）。
-
-    何时调用：已知仓库但不知道模块/文件路径，或需要确认某个 ref 下的目录结构时；
-    找到目标文件后再用 gitlab_get_file，``recursive`` 用于控制扫描范围。
-    """
+    """列出已知 GitLab 仓库目录树；只读且范围由 recursive 控制，返回 JSON ok 或 error.retryable。"""
     try:
         items = gitlab.GitLabClient().list_tree(
             project_id, path=path, ref=ref, recursive=recursive, per_page=per_page
@@ -1225,11 +1049,7 @@ def gitlab_list_tree(
 
 @_tool()
 def gitlab_list_branches(project_id: str, per_page: int = 50) -> str:
-    """列出 GitLab 仓库分支及保护状态（只读）。
-
-    何时调用：读取源码前需要选择 hotfix/release/master 等真实 ref，或需要确认
-    默认/保护分支时；不要直接猜测仓库分支名。
-    """
+    """列出已知 GitLab 仓库分支及保护状态；只读，返回 JSON ok 或 error.retryable。"""
     try:
         branches = gitlab.GitLabClient().list_branches(project_id, per_page=per_page)
         slim = [
@@ -1281,27 +1101,7 @@ def obs_sls_query(
     clip_len: int = 2000,
     container_name: str = "",
 ) -> str:
-    """查询国内公有云（cn）阿里云 SLS 日志：盘古 prod + 非生产 dev/test 全覆盖。
-
-    环境路由（system="盘古"，由 MCP 完成 project/logstore/namespace 映射，调用方不接触 AK）：
-      - prod → pangu-cn-saas-3-prod-shared-sls-project-0 / saas-prod
-      - dev  → pangu-cn-saas-3-nonprod-shared-sls-project-0 / saas-dev-new
-      - test → pangu-cn-saas-3-nonprod-shared-sls-project-0 / saas-test-new
-    盘古非生产(dev/test)曾短暂迁移到 Loki，现已迁回阿里云 SLS，统一用本工具；
-    obs_log_*（Loki）只保留 AWS 海外(jp-saas-1)。
-
-    用法：
-      - trace_id：按 traceId 做「ERROR/WARN + 全链路」两阶段查询（传了则优先于 keyword）。
-      - keyword：SLS 查询子句（与 _namespace_ 过滤 AND 组合），如 'content: "订单不存在"'。
-      - level：默认 ERROR；传空字符串表示不过滤级别。
-      - container_name：按容器精确缩小范围；排查独立脚本、适配器脚本或外部接口二开时
-        固定传 ``srm-script-container``，避免扫描其它服务日志。
-      - time_range：最近30分钟/最近2小时/最近3天、今天/昨天/前天/本周/上周/本月/上月，
-        或 30m/2h/1d，或 "YYYY-MM-DD HH:mm~HH:mm"（北京时间）。
-      - auto_expand：未显式指定时间窗且 0 命中时，自动扩到最近 24h、72h 各重试一次，
-        实际尝试过的窗口在 meta.attempted_windows 中返回（SLS 时间对齐偏差大时很有用）。
-      - clip_len：每条日志字段截断长度（默认 2000，0 表示不裁剪）。
-    """
+    """查询国内盘古阿里云 SLS 日志；由 environment 路由项目/日志库且不暴露 AK，时间窗与返回均有界，返回 JSON ok/error.retryable。"""
     try:
         container = container_name.strip()
         if container and not re.fullmatch(r"[A-Za-z0-9._-]+", container):
@@ -1408,13 +1208,7 @@ def query_script_trace(
     limit: int = 200,
     include_raw: bool = False,
 ) -> str:
-    """按 traceId 查询脚本容器日志并整理成阶段时间线（国内 SLS）。
-
-    from_time/to_time 是强制时间边界；只传 traceId 时返回参数错误，不把“没有
-    日志”误报成结论。默认限定 ``_container_name_: srm-script-container``，可再按
-    script_code 缩小范围。默认只返回裁剪后的消息、阶段和数量，真实完整报文仅在
-    联调开关 ``include_raw=true`` 时返回。
-    """
+    """按 traceId 查询 srm-script-container SLS 日志并整理阶段时间线；必须提供时间边界，返回 JSON ok 或 error.retryable。"""
     if not trace_id.strip():
         return _err("bad_param", "trace_id 不能为空", retryable=False)
     if not from_time or not to_time:
@@ -1476,12 +1270,7 @@ def query_script_trace(
 
 @_tool()
 def obs_sls_targets() -> str:
-    """列出阿里云 SLS 支持的系统/环境映射（只读，不含凭据）。
-
-    何时调用：不确定国内盘古到底支持哪些 ``environment``（prod/dev/test）时；
-    返回 system/environment → project/logstore/namespace 的真实映射，
-    避免凭空猜测环境名。AWS 海外日志不走 SLS，请用 obs_log_datasources(region="aws")。
-    """
+    """列出国内盘古 SLS 环境与命名空间映射；只读，返回 JSON ok 或 error.retryable。"""
     return _ok({
         "note": "国内公有云盘古 prod 与非生产 dev/test 均在阿里云 SLS；Loki(obs_log_*)仅 AWS 海外。",
         "targets": sls_config.supported_targets(),
@@ -1505,15 +1294,7 @@ def search_knowledge(
     limit: int = 10,
     use_semantic: bool = True,
 ) -> str:
-    """检索业务知识、系统机制和排查经验（只读）。
-
-    何时调用：本地精确手册不覆盖、需要跨案例发现时。精确关键词或低延迟
-    场景先传 ``use_semantic=false``；关键词未命中再启用语义检索。
-    ``query`` 为空时按过滤条件列出最近更新的知识。``knowledge_type`` 可用 business/system/technical/
-    troubleshooting/data_model/configuration/experience/rule，``status`` 可用
-    draft/verified/deprecated/archived；``verified_only=true`` 只返回 verified。
-    ``limit`` 最大 50。结果中的 ``id`` 可交给 get_knowledge 获取完整正文。
-    """
+    """检索盘古认知库知识；只读，支持关键词/语义和过滤条件，返回结果或可读错误。"""
     return kb.search_knowledge(query, knowledge_type, system, module, status, verified_only, limit, use_semantic)
 
 
@@ -1527,15 +1308,7 @@ def search_sql_templates(
     limit: int = 10,
     use_semantic: bool = True,
 ) -> str:
-    """检索可复用的 SQL/修复模板（只读，混合检索）。
-
-    何时调用：复杂、重复或数据修复场景需要复用历史方案时。低延迟路径先传
-    ``use_semantic=false`` 和 ``verified_only=true``；关键词未命中且历史方案
-    仍有价值时再启用语义检索。可用过滤项为
-    ``category``、``system``、``business_domain``；``keyword`` 为空时用于
-    按过滤条件总览模板，``limit`` 最大 50。命中结果的 ``id`` 交给
-    get_sql_template；复用完成后再调用 record_template_usage。
-    """
+    """检索 SQL/修复模板；只读，支持关键词/语义和过滤条件，返回结果或可读错误。"""
     return kb.search_sql_templates(keyword, category, system, business_domain, verified_only, limit, use_semantic)
 
 
@@ -1547,86 +1320,45 @@ def search_tables(
     top_k: int = 5,
     use_semantic: bool = True,
 ) -> str:
-    """按关键词/语义检索表目录（只读），返回候选表元数据。
-
-    何时调用：不知道真实表名、需要从业务描述定位表时。已知表名不要调用。
-    精确业务词或低延迟场景可先传 ``use_semantic=false``。``query`` 必填；
-    ``domain``/``db_name`` 用于缩小范围，``top_k`` 最大 20。目录结果是
-    候选和业务注释，不等同于当前数据库字段事实；字段存在性和完整 DDL
-    必须再用 archery_describe_table/archery_list_columns 确认。
-    """
+    """检索表目录候选；只读，结果不替代实时 Archery 字段事实，返回结果或可读错误。"""
     return kb.search_tables(query, domain, db_name, top_k, use_semantic)
 
 
 @_tool()
 def search_pangu(query: str, system: str = "", module: str = "", category: str = "", top_k: int = 3) -> str:
-    """统一快速发现：一次检索知识、模板、表及候选表关系（只读）。
-
-    适合刚收到一个跨知识/数据域的问题时做第一轮定位；内部并行检索三个
-    数据源及候选表关系。``system``、
-    ``module``、``category`` 可缩小结果，``top_k`` 最大 5。它是关键词快速
-    发现，不替代专项检索或实时 Archery 查询；拿到 id/表名后继续调用
-    get_knowledge、get_sql_template、get_table 或 get_table_relations。
-    """
+    """并行发现知识、模板、表及候选关系；只读，不替代实时日志或数据库查询，返回结果或可读错误。"""
     return kb.search_pangu(query, system, module, category, top_k)
 
 
 # ---- Context：获取完整上下文 ----
 @_tool()
 def get_knowledge(doc_id: int) -> str:
-    """按 ``doc_id`` 获取单条知识的完整 Markdown 正文及元数据（只读）。
-
-    先用 search_knowledge 命中 id，再调用本工具；适合需要引用完整规则、
-    排查步骤或字段说明时使用。
-    """
+    """按 doc_id 读取完整认知库知识；只读，返回正文或可读错误。"""
     return kb.get_knowledge(doc_id)
 
 
 @_tool()
 def get_sql_template(template_id: int) -> str:
-    """按 ``template_id`` 获取单条 SQL 模板及风险/验证元数据（只读）。
-
-    先用 search_sql_templates 命中 id，再读取完整 SQL 和参数说明。模板中的
-    UPDATE/DELETE/INSERT 仅表示供人工确认的方案，不代表本 MCP 会执行写入。
-    """
+    """按 template_id 读取 SQL 模板及风险/验证信息；只读，模板 SQL 不会被执行。"""
     return kb.get_sql_template(template_id)
 
 
 @_tool()
 def get_table(table_name: str, db_name: str = "") -> str:
-    """按表名获取目录元数据详情（只读）。
-
-    返回表注释、描述、关键字段和入口字段，适合 search_tables 命中后补全
-    上下文；它不是实时 DDL，字段最终仍需 Archery 专用工具确认。
-    ``db_name`` 为空时使用目录默认库（通常为 srm）。
-    """
+    """按表名读取目录元数据；只读，不替代实时 DDL，返回结果或可读错误。"""
     return kb.get_table(table_name, db_name)
 
 
 @_tool()
 def get_table_relations(table_name: str) -> str:
-    """获取某张表已沉淀的关联关系（只读）。
-
-    返回 from/to 表、join 条件、关系类型、描述、置信度（confidence）、
-    是否已验证（verified）及来源（source）。用于设计 JOIN 或诊断数据链路。
-    可信度指引：优先采信 ``verified=true`` 且 ``source=archery_select`` 的关系；
-    未验证的关系仅作候选，执行前仍需用 archery_list_columns 确认两端字段存在，
-    并用 SELECT 验证 join 结果。关系是知识库沉淀，不等于数据库约束。
-    """
+    """读取表关联元数据；只读，关系须再用 Archery 核验字段与 JOIN，返回结果或可读错误。"""
     return kb.get_table_relations(table_name)
 
 
 # ---- Composite：组合诊断 ----
 @_tool()
 def diagnose_context(query: str, system: str = "", module: str = "", limit: int = 3) -> str:
-    """组合诊断：为一个问题汇集知识 → 模板 → 表 → 关系（只读）。
-
-    何时调用：排障或复杂 SQL 任务尚未知道该查哪类资料时，作为第一轮
-    上下文收集器；内部并行检索知识、模板、表及候选关系。
-    ``system``/``module`` 可过滤知识，``limit`` 最大 5。
-    结果用于确定下一步工具，不会查询实时日志/数据库，也不会自动生成或
-    执行修复 SQL；随后按结果分别调用专项工具和 Archery。
-    """
+    """汇集知识、模板、表和关系的组合诊断上下文；只读，不查询实时后端或执行修复 SQL。"""
     return kb.diagnose_context(query, system, module, limit)
 
 
@@ -1647,14 +1379,7 @@ def save_knowledge(
     created_by: str = "",
     skip_dup_check: bool = False,
 ) -> str:
-    """写入一条业务知识/排查经验（写操作，需用户确认内容）。
-
-    ``content_md`` 必须是规范 Markdown；``core_tables``、``tags``、
-    ``related_template_ids`` 传逗号分隔值（如 ``a,b``）。默认 ``status=draft``，
-    只有经过事实核验后才设 verified；``knowledge_type`` 见 search_knowledge
-    的枚举。适合沉淀本次确认过的稳定规则、排查结论或数据模型说明，不要把
-    会变化的当前日志/数据写成知识。写入 knowledge_docs，不修改业务库。
-    """
+    """写入认知库知识；只写元数据，必须确认内容，不修改业务数据库。"""
     return kb.save_knowledge(
         title, content_md, knowledge_type, system, module, summary,
         core_tables, related_template_ids, tags, status, source_type, created_by, skip_dup_check,
@@ -1676,15 +1401,7 @@ def update_knowledge(
     status: str = "",
     source_type: str = "",
 ) -> str:
-    """部分更新已有知识条目（写操作，需用户确认）。
-
-    先用 get_knowledge 确认 ``doc_id``，只传需要修改的字段。适合修正
-    正文/标题/归类、把核验过的知识标为 verified（verified_at 自动写入）、
-    或将过时知识标记 deprecated/archived（优于直接删除）。修改正文等
-    影响语义检索的字段时会自动重新生成 embedding。``core_tables``、
-    ``tags``、``related_template_ids`` 传逗号分隔值。只写认知层元数据，
-    不修改业务数据库。
-    """
+    """更新认知库知识；只写元数据，必须确认目标与变更，不修改业务数据库。"""
     return kb.update_knowledge(
         doc_id, title, content_md, knowledge_type, system, module, summary,
         core_tables, related_template_ids, tags, status, source_type,
@@ -1693,12 +1410,7 @@ def update_knowledge(
 
 @_tool()
 def delete_knowledge(doc_id: int) -> str:
-    """删除指定知识条目（破坏性写操作，必须用户明确确认）。
-
-    仅用于清理错误、重复或已彻底作废的知识；删除前先 get_knowledge 核对
-    id。若知识只是内容过时但仍有参考价值，建议改用 update_knowledge 置
-    status=deprecated/archived 而非物理删除。本操作不影响业务数据库。
-    """
+    """删除认知库知识；破坏性元数据写入，必须明确确认，不影响业务数据库。"""
     return kb.delete_knowledge(doc_id)
 
 
@@ -1731,17 +1443,7 @@ def save_sql_template(
     created_by: str = "",
     skip_dup_check: bool = False,
 ) -> str:
-    """写入一条可复用 SQL/修复模板（写操作，需用户确认内容）。
-
-    适合复杂查询或人工执行的修复方案在验证后沉淀；本工具只写模板库，
-    不执行 ``sql_text``。``keywords``/``core_tables`` 传逗号分隔值，
-    ``parameters`` 必须是 JSON 对象字符串（例如
-    ``{"tenant_id":{"type":"bigint","required":true}}``）。
-    数据修复模板应通过 ``execution_flow`` 保存步骤，通过 ``example_case``
-    保存脱敏执行案例；问题描述、症状、根因、前置条件、诊断步骤及校验/回滚
-    SQL 可分别写入对应字段。``status`` 可用 draft/verified/trusted/deprecated，``risk_level`` 可用
-    LOW/MEDIUM/HIGH/CRITICAL；未核验模板保持 draft。
-    """
+    """写入 SQL/修复模板元数据；必须确认内容，不执行模板 SQL。"""
     return kb.save_sql_template(
         title, category, scenario, sql_text, keywords, core_tables, verified, template_no,
         system, status, risk_level, business_domain, source_type, parameters,
@@ -1759,11 +1461,7 @@ def list_sql_templates(
     verified_only: bool = False,
     limit: int = 50,
 ) -> str:
-    """列出模板库总览（只读）。
-
-    用于维护或不知道模板 id 时按分类、系统、业务域和 verified 状态浏览；
-    ``limit`` 最大 200。只读查看不需要确认，变更请使用 update/delete 写工具。
-    """
+    """列出 SQL 模板元数据；只读，返回结果或可读错误。"""
     return kb.list_sql_templates(category, system, business_domain, verified_only, limit)
 
 
@@ -1795,14 +1493,7 @@ def update_sql_template(
     source_type: str = "",
     verified: bool = False,
 ) -> str:
-    """部分更新已有模板（写操作，需用户确认）。
-
-    先用 get_sql_template 确认 ``template_id``；只传需要修改的字段。适合
-    修正 SQL/分类/风险、补充参数、执行流程、脱敏案例、诊断字段或把已核验
-    模板标为 verified。``parameters`` 仍须为 JSON 对象字符串；
-    ``verified=true`` 会将状态提升为 verified。
-    不会执行模板 SQL。
-    """
+    """更新 SQL 模板元数据；必须确认目标与变更，不执行模板 SQL。"""
     return kb.update_sql_template(
         template_id, title, scenario, sql_text, category, system, status, risk_level,
         business_domain, keywords, core_tables, template_no, parameters,
@@ -1814,20 +1505,13 @@ def update_sql_template(
 
 @_tool()
 def delete_sql_template(template_id: int) -> str:
-    """删除指定模板（破坏性写操作，必须用户明确确认）。
-
-    仅用于清理错误、重复或已废弃模板；删除前先 get_sql_template 核对 id，
-    本操作不影响业务数据库。
-    """
+    """删除 SQL 模板元数据；破坏性写入，必须明确确认，不影响业务数据库。"""
     return kb.delete_sql_template(template_id)
 
 
 @_tool()
 def record_template_usage(template_id: int) -> str:
-    """记录一次模板复用（写入使用统计，不执行 SQL）。
-
-    仅在模板确实被采用后调用，避免为了排序而虚增 usage_count。
-    """
+    """记录 SQL 模板使用统计；仅写认知层元数据，不执行模板 SQL。"""
     return kb.record_template_usage(template_id)
 
 
@@ -1844,19 +1528,7 @@ def add_table_relation(
     verified: bool = False,
     source: str = "manual",
 ) -> str:
-    """写入一条表关联关系（写操作，需用户确认，按键 upsert）。
-
-    仅在 Archery/SELECT 验证两端字段和 join 结果后调用；``join_on`` 传可读
-    的连接条件（如 ``a.order_id = b.order_id``），``confidence`` 范围 0~1，
-    ``from_db``/``to_db`` 用实际库名。
-
-    可信度属性：
-      - ``verified=true``：已经 Archery/SELECT 实测验证过两端字段与 join 结果；
-        仅实测通过才置 true，否则保持 false 让 SQL Agent 谨慎使用。
-      - ``source``：来源枚举 archery_select(实测)/ddl(外键推断)/manual(人工)/inferred(自动推断)。
-    ``join_on`` 传可读的连接条件（如 ``a.order_id = b.order_id``），该记录是
-    知识库元数据，不创建数据库外键，也不执行 join。
-    """
+    """写入或更新表关联元数据；需已有 Archery/SELECT 证据并确认，不创建数据库外键。"""
     return kb.add_table_relation(
         from_table, to_table, join_on, relation_type, description,
         confidence, from_db, to_db, verified=verified, source=source,
@@ -1865,11 +1537,7 @@ def add_table_relation(
 
 @_tool()
 def record_table_usage(table_names: str) -> str:
-    """记录本次实际使用过的表（写入目录使用统计）。
-
-    ``table_names`` 传逗号分隔表名，例如 ``sodr_order,slod_asn``；仅在查询
-    或诊断确实使用后调用，不修改表元数据和业务数据。
-    """
+    """记录表目录使用统计；仅写认知层元数据，不修改表或业务数据。"""
     return kb.record_table_usage(table_names)
 
 
@@ -1877,13 +1545,7 @@ def record_table_usage(table_names: str) -> str:
 def upsert_table_knowledge(
     table_name: str, description: str = "", tags: str = "", db_name: str = "",
 ) -> str:
-    """修正或补录表目录描述/标签（写操作，需用户确认，按库名+表名 upsert）。
-
-    何时调用：search_tables/get_table 未收录或描述过期，且已通过 Archery
-    确认真实表后补录。至少提供 ``description``、``tags`` 或 ``db_name`` 之一；
-    ``tags`` 传逗号分隔值。这里只写 table_catalog 元数据，不替代实时 DDL，
-    不修改业务表。
-    """
+    """修正或补录表目录元数据；至少提供 description、tags、db_name 之一并确认，不替代实时 DDL。"""
     if not any(value.strip() for value in (description, tags, db_name)):
         raise ValueError("description、tags、db_name 至少提供一项非空值")
     return kb.upsert_table_knowledge(table_name, description, tags, db_name)
@@ -1902,18 +1564,7 @@ _advertise_nonempty_any_of(
 
 @_tool()
 def es_search(index: str, dsl: str = "", size: int = 10, env: str = "prod") -> str:
-    """在正式环境 ES 指定索引上执行只读查询（_search）。
-
-    ⛔ 安全约束（任何场景强制，不可绕过）：
-      - 严禁删除/更新/写入 ES 数据，仅可查询。
-      - 每次最多返回 100 条（ES_MAX_SIZE，size 超出自动截断）。
-
-    参数:
-      index: 索引名，可单索引（swbh_todo）或通配（swbh_*），多索引逗号分隔
-      dsl:   查询 DSL JSON 字符串；留空 = match_all；支持 query/sort/aggs/from 等
-      size:  期望返回条数，默认 10，硬上限 ES_MAX_SIZE
-      env:   ES 环境 prod/dev/test（默认 prod）；未配置该环境链接时返回 es_unconfigured
-    """
+    """在指定环境执行 ES 只读 _search；禁止写入且单次最多返回 ES_MAX_SIZE 条，返回 JSON ok 或 error.retryable。"""
     try:
         client = es.get_client(env)
     except es.ESSafetyError as e:
@@ -1927,13 +1578,7 @@ def es_search(index: str, dsl: str = "", size: int = 10, env: str = "prod") -> s
 
 @_tool()
 def es_count(index: str, dsl: str = "", env: str = "prod") -> str:
-    """统计正式环境 ES 指定索引的文档数（只读 _count，不受条数上限限制，仅返回数量）。
-
-    参数:
-      index: 索引名或通配（swbh_*）
-      dsl:   可选查询 DSL（JSON），留空 = 全部计数
-      env:   ES 环境 prod/dev/test（默认 prod）；未配置该环境链接时返回 es_unconfigured
-    """
+    """统计指定环境 ES 文档数；只读 _count，不受返回条数上限影响，返回 JSON ok 或 error.retryable。"""
     try:
         client = es.get_client(env)
     except es.ESSafetyError as e:
@@ -1949,13 +1594,7 @@ def es_count(index: str, dsl: str = "", env: str = "prod") -> str:
 
 @_tool()
 def es_get(index: str, doc_id: str, env: str = "prod") -> str:
-    """按 _id 读取正式环境 ES 单个文档（只读 _source 端点）。
-
-    参数:
-      index: 索引名
-      doc_id: 文档 _id
-      env:   ES 环境 prod/dev/test（默认 prod）；未配置该环境链接时返回 es_unconfigured
-    """
+    """读取指定环境 ES 单个文档；只读 _source，返回 JSON ok 或 error.retryable。"""
     try:
         client = es.get_client(env)
     except es.ESSafetyError as e:
@@ -1977,13 +1616,7 @@ def es_get(index: str, doc_id: str, env: str = "prod") -> str:
 def get_workflow_guide(
     topic: Literal["overview", "requirement", "triage", "repair", "knowledge", "handoff", "capabilities"] = "overview",
 ) -> str:
-    """按需读取跨 agent 的 SRM 协作协议（本地只读，无网络或业务查询）。
-
-    缺少 skills、跨流程交接或恢复任务时调用；明确单项任务无需预先调用。
-    overview 路由；requirement 需求；triage 排障；repair 修复；knowledge 沉淀；
-    handoff 证据交接。capabilities 返回当前已注册工具及读写提示，不探测后端健康。
-    工具参数仍以 tools/list schema 为准；提示不授予写入权限。
-    """
+    """读取本地协作协议或工具能力清单；只读，不探测后端健康，返回 JSON ok 或 error.retryable。"""
     if topic == "capabilities":
         return _ok({
             "contract_version": 1,
