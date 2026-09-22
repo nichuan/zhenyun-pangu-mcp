@@ -37,6 +37,9 @@ def test_validate_select_sql_rejects_unsupported_syntax(sql):
         "SELECT tenant_id, tenant_num FROM hpfm_tenant WHERE tenant_num = 'SRM' LIMIT 10",
         "SELECT tenant_id FROM hpfm_tenant ORDER BY tenant_id DESC LIMIT 10;",
         "SELECT enabled_flag FROM hpfm_tenant WHERE tenant_name LIKE '%采购%'",
+        "SELECT CASE WHEN enabled_flag = 1 THEN 'enabled' ELSE 'disabled' END AS state FROM hpfm_tenant LIMIT 10",
+        "SELECT tenant_id FROM hpfm_tenant WHERE tenant_id IN (1, 2)",
+        "SELECT tenant_id FROM hpfm_tenant WHERE tenant_num NOT IN ('SRM', 'SRM-AUX') LIMIT 10",
     ],
 )
 def test_validate_select_sql_accepts_basic_queries(sql):
@@ -65,7 +68,9 @@ def test_validate_select_sql_accepts_safe_functions(sql):
         "SELECT SLEEP(1) FROM hpfm_tenant",
         "SELECT LOAD_FILE('/etc/passwd') FROM hpfm_tenant",
         "SELECT COALESCE(tenant_name, '') FROM hpfm_tenant",
-        "SELECT tenant_id FROM hpfm_tenant WHERE tenant_id IN (1, 2)",
+        "SELECT tenant_id FROM hpfm_tenant WHERE tenant_id IN (SELECT tenant_id FROM hpfm_tenant)",
+        "SELECT tenant_id FROM hpfm_tenant WHERE tenant_id IN (1, SLEEP(1))",
+        "SELECT (1 + 2) AS value",
         "SELECT COUNT(*) FROM (SELECT tenant_id FROM hpfm_tenant) x",
         "SELECT COUNT(SELECT 1) FROM hpfm_tenant",
         "SELECT COUNT(*) FROM hpfm_tenant WHERE tenant_id = (SELECT MAX(tenant_id) FROM hpfm_tenant)",

@@ -397,7 +397,7 @@ def archery_query(
     db: str | None = None,
     limit: int = 100,
 ) -> str:
-    """执行 Archery 只读 SQL；site 必须为 cn/aws，允许单条 SELECT/EXPLAIN SELECT/SHOW CREATE TABLE 及白名单无副作用函数，拒绝子查询、窗口、多语句、注释和写入。"""
+    """执行 Archery 只读 SQL；site 必须为 cn/aws，支持单条 SELECT/EXPLAIN SELECT/SHOW CREATE TABLE、CASE 表达式、IN 值列表及白名单无副作用函数，拒绝子查询、窗口、多语句、注释和写入。"""
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB

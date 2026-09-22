@@ -3,8 +3,8 @@
 使用 csrftoken + sessionid 认证模型（双站点 cn/aws），
 覆盖盘古专属能力：租户查询、实例列表、环境映射。
 
-只读安全：用户可执行的 SQL 仅允许单条基础 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE，
-写操作及高级语法拦截。
+只读安全：用户可执行的 SQL 仅允许单条 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE，
+支持 CASE 表达式和 IN 值列表；写操作及不安全的高级语法拦截。
 """
 from __future__ import annotations
 
@@ -44,11 +44,12 @@ _UNSUPPORTED_SQL_TOKENS = (
     "create", "truncate", "grant", "revoke", "call", "execute", "set", "use",
     "show", "describe", "explain", "with", "union", "intersect", "except",
     "over", "partition", "window", "procedure", "function", "trigger", "into", "outfile",
-    "dumpfile", "for", "lock", "case", "when", "then", "else", "end",
+    "dumpfile", "for", "lock",
 )
 
-# Parentheses are allowed only for deterministic, read-only scalar functions.
-# Every other parenthesized construct remains rejected, including subqueries.
+# Parentheses are allowed for deterministic, read-only scalar functions and IN
+# value lists. Every other parenthesized construct remains rejected, including
+# subqueries and arbitrary grouping.
 _SAFE_SQL_FUNCTIONS = frozenset({
     "count", "sum", "avg", "min", "max", "ifnull", "nullif",
     "concat", "concat_ws", "cast",
@@ -59,13 +60,13 @@ def _sql_code(sql: str) -> str:
     """返回 SQL 的非字符串部分，同时拒绝注释和多语句。
 
     仅用于安全边界校验，不是完整 SQL parser；字符串中的关键字/分号不会被
-    误判，字符串外的注释、括号和语句分隔符则一律拒绝。
+    误判，字符串外的注释、语句分隔符和未授权的括号结构会被拒绝。
     """
     if not isinstance(sql, str) or not sql.strip():
         raise ArcheryError("SQL 不能为空")
 
     code: list[str] = []
-    function_parens: list[str] = []
+    allowed_parens: list[str] = []
     i = 0
     n = len(sql)
     while i < n:
@@ -107,34 +108,41 @@ def _sql_code(sql: str) -> str:
             # parenthesis; whitespace before '(' is intentionally rejected.
             match = re.search(r"([A-Za-z_][A-Za-z0-9_$]*)$", "".join(code))
             function_name = match.group(1).lower() if match else ""
-            if function_name not in _SAFE_SQL_FUNCTIONS:
+            if function_name in _SAFE_SQL_FUNCTIONS:
+                allowed_parens.append("function")
+            elif re.search(r"\bin\s*$", "".join(code), flags=re.IGNORECASE):
+                # IN lists such as `id IN (1, 2)` or `code NOT IN ('A', 'B')`
+                # are read-only scalar predicates. Subqueries and nested
+                # parentheses remain blocked by the checks below.
+                allowed_parens.append("in-list")
+            else:
                 raise ArcheryError(
-                    "仅允许白名单无副作用函数调用，不支持子查询或其它括号结构"
+                    "仅允许白名单无副作用函数、IN 值列表，不支持子查询或其它括号结构"
                 )
-            function_parens.append(function_name)
             code.append(ch)
             i += 1
             continue
         if ch == ")":
-            if not function_parens:
-                raise ArcheryError("括号结构不受支持；仅允许白名单无副作用函数调用")
-            function_parens.pop()
+            if not allowed_parens:
+                raise ArcheryError("括号结构不受支持；仅允许白名单函数和 IN 值列表")
+            allowed_parens.pop()
             code.append(ch)
             i += 1
             continue
         code.append(ch)
         i += 1
-    if function_parens:
-        raise ArcheryError("SQL 包含未闭合的函数括号")
+    if allowed_parens:
+        raise ArcheryError("SQL 包含未闭合的括号")
     return "".join(code)
 
 
 def validate_select_sql(sql: str) -> None:
     """校验用户 SQL 必须是单条基础只读语句。
 
-    允许基础 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE；SELECT 支持常见的
-    列/表/WHERE/ORDER BY/GROUP BY/LIMIT 等语法。不允许 CTE、集合运算、窗口函数、
-    仅允许白名单无副作用函数括号；其余函数/括号、子查询、DDL/DML、注释和多语句均拒绝。
+    允许 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE；SELECT 支持常见的
+    列/表/WHERE/ORDER BY/GROUP BY/LIMIT、CASE 表达式和 IN 值列表。不允许 CTE、
+    集合运算、窗口函数；括号仅允许白名单无副作用函数和 IN 值列表，子查询、DDL/DML、
+    注释和多语句均拒绝。
 
     函数名保留为历史名称，调用方无需修改。
     """
