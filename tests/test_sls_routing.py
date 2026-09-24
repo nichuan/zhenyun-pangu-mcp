@@ -242,13 +242,45 @@ def test_sls_trace_applies_container_to_error_and_full_queries(monkeypatch):
 
 
 def test_obs_sls_query_rejects_unsafe_container_name():
-    raw = server.obs_sls_query(container_name='srm-script-container" OR *')
+    result = json.loads(server.obs_sls_query(container_name='srm-script-container" OR *'))
 
-    assert '"ok": false' in raw
-    assert "container_name 只能包含" in raw
+    assert result["ok"] is False
+    assert result["error"]["code"] == "bad_param"
+    assert result["error"]["retryable"] is False
+    assert "container_name 只能包含" in result["error"]["message"]
 
 
 def test_obs_sls_query_unknown_env_returns_error():
-    raw = server.obs_sls_query(environment="no-such-env")
-    assert '"ok": false' in raw
-    assert "不支持的系统/环境" in raw
+    result = json.loads(server.obs_sls_query(environment="no-such-env"))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "bad_param"
+    assert result["error"]["retryable"] is False
+    assert "不支持的系统/环境" in result["error"]["message"]
+
+
+def test_obs_sls_query_missing_credentials_is_not_retryable(monkeypatch):
+    def missing_credentials(_target):
+        raise RuntimeError("missing key")
+
+    monkeypatch.setattr(sls_config, "credentials", missing_credentials)
+
+    result = json.loads(server.obs_sls_query(environment="dev"))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "config"
+    assert result["error"]["retryable"] is False
+
+
+def test_obs_sls_query_transient_backend_error_is_retryable(monkeypatch):
+    def unavailable_backend(*_args):
+        raise RuntimeError("temporary failure")
+
+    monkeypatch.setattr(sls_config, "credentials", lambda target: ("ak-id", "ak-secret"))
+    monkeypatch.setattr(sls, "query_sls", unavailable_backend)
+
+    result = json.loads(server.obs_sls_query(environment="dev"))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "sls_query"
+    assert result["error"]["retryable"] is True

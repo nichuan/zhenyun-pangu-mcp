@@ -109,6 +109,7 @@ LOKI_DATASOURCES = {
 CHOERODON_BASE_URL = os.getenv("CHOERODON_BASE_URL", "https://open-gateway.going-link.com")
 CHOERODON_ORG_ID = os.getenv("CHOERODON_ORG_ID", "1")
 CHOERODON_TENANT_ID = os.getenv("CHOERODON_TENANT_ID", "1")
+CHOERODON_MENU_ID = os.getenv("CHOERODON_MENU_ID", "0")
 # 默认项目 ID(日常故障/数据修复项目)。调用方可显式传 project_id
 # 查询当前账号可访问的任意项目；项目名称/ID 可用 choerodon_list_projects 发现。
 CHOERODON_PROJECT_ID = os.getenv("CHOERODON_PROJECT_ID", "58")

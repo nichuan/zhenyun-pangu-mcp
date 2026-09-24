@@ -34,12 +34,34 @@ def test_archery_list_instances_rejects_unknown_site():
 
 
 def test_archery_query_tenant_rejects_empty_tenant_before_backend_access():
-    result = json.loads(server.archery_query_tenant())
+    result = json.loads(server.archery_query_tenant(tenant=""))
 
     assert result["ok"] is False
-    assert result["error"]["code"] == "archery_query_tenant"
+    assert result["error"]["code"] == "bad_param"
     assert result["error"]["retryable"] is False
     assert "tenant 必填" in result["error"]["message"]
+
+
+def test_archery_inputs_expose_required_fields_and_finite_choices():
+    tools = server.mcp._tool_manager._tools
+    tenant_schema = tools["archery_query_tenant"].parameters
+    site_schema = tools["archery_query"].parameters["properties"]["site"]
+    es_env_schema = tools["es_search"].parameters["properties"]["env"]
+    repo_mode_schema = tools["search_repo"].parameters["properties"]["mode"]
+
+    assert "tenant" in tenant_schema["required"]
+    assert site_schema["enum"] == ["cn", "aws"]
+    assert es_env_schema["enum"] == ["prod", "dev", "test"]
+    assert repo_mode_schema["enum"] == ["content", "filename", "modules"]
+
+
+def test_archery_sql_parameter_errors_are_not_retryable():
+    result = json.loads(server.archery_query("SELECT SLEEP(1)"))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "bad_param"
+    assert result["error"]["retryable"] is False
+    assert "白名单" in result["error"]["message"]
 
 
 def test_conditional_required_fields_are_advertised_in_tool_schemas():

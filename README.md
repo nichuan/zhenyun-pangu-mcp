@@ -24,16 +24,16 @@
 > - **日志能力**：`obs_sls_query` / `obs_sls_targets`（国内公有云盘古 prod/dev/test，阿里云 SLS）/ `obs_log_query` / `obs_log_trace` / `obs_log_datasources`（AWS 海外，Loki）
 > - **数据能力**：`archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances`
 > - **ES 只读能力**：`es_search` / `es_count` / `es_get`（prod/dev/test，未配置时返回明确降级提示）
-> - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，以只读查询为主，`choerodon_add_comment` 为需确认的写操作）
+> - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，以只读查询为主，评论新增、编辑和删除为需授权的写操作）
 > - **代码与脚本能力**：`search_repo`（本地跨仓搜索）+ `search_adapter_scripts` / `search_standalone_scripts`（只发现脚本身份）+ 已知路径的 `gitlab_list_branches/list_tree/get_file` 精确读取。当前脚本正文统一由 Script Platform MCP 获取；GitLab 项目/代码搜索默认禁用。
 >
-> **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼查询类（`choerodon_*_issue` / `choerodon_list_*` / `choerodon_search_*` / `choerodon_get_*` / `choerodon_download_*`）、代码检索为**只读**，Agent 可自主调用。`archery_query` 的用户 SQL 允许单条 `SELECT`、`EXPLAIN SELECT`、`SHOW CREATE TABLE`；SELECT 支持 `CASE WHEN` 表达式、`IN (...)` / `NOT IN (...)` 值列表，以及 `COUNT`、`SUM`、`AVG`、`MIN`、`MAX`、`IFNULL`、`NULLIF`、`CONCAT`、`CONCAT_WS`、`CAST`。不支持其它 `SHOW/DESC`、`WITH`、子查询、多语句、注释、窗口函数、集合运算或任何写入语法；实例/库/表结构由专用工具提供。任何生产 INSERT/UPDATE/DELETE **不在本 MCP 提供**，统一由 Skill 生成 SQL 后交用户人工确认执行。认知层的 `search_*` / `get_*` / `diagnose_context` / `list_sql_templates` 为只读；`save_*`、`update_*`、`delete_*`、`add_table_relation`、`upsert_table_knowledge` 和使用统计工具会写入 knowledge_docs / sql_templates / table_catalog / table_relations 元数据，不影响业务数据，调用前应确认沉淀内容。`choerodon_add_comment` 会真实写入猪齿鱼评论，必须先确认内容；评论必须传规范 Markdown，禁止纯文本和原始 HTML，工具会负责 Markdown 渲染。
+> **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼查询类（`choerodon_*_issue` / `choerodon_list_*` / `choerodon_search_*` / `choerodon_get_*` / `choerodon_download_*`）、代码检索为**只读**，Agent 可自主调用。`archery_query` 的用户 SQL 允许单条 `SELECT`、`EXPLAIN SELECT`、`SHOW CREATE TABLE`；SELECT 支持 `CASE WHEN` 表达式、`IN (...)` / `NOT IN (...)` 值列表，以及 `COUNT`、`SUM`、`AVG`、`MIN`、`MAX`、`IFNULL`、`NULLIF`、`CONCAT`、`CONCAT_WS`、`CAST`。不支持其它 `SHOW/DESC`、`WITH`、子查询、多语句、注释、窗口函数、集合运算或任何写入语法；实例/库/表结构由专用工具提供。任何生产 INSERT/UPDATE/DELETE **不在本 MCP 提供**，统一由 Skill 生成 SQL 后交用户人工确认执行。认知层的 `search_*` / `get_*` / `diagnose_context` / `list_sql_templates` 为只读；`save_*`、`update_*`、`delete_*`、`add_table_relation`、`upsert_table_knowledge` 和使用统计工具会写入 knowledge_docs / sql_templates / table_catalog / table_relations 元数据，不影响业务数据，调用前应确认沉淀内容。`choerodon_add_comment`、`choerodon_update_comment` 和 `choerodon_delete_comment` 会真实修改猪齿鱼评论，须先确认完整最终正文或删除目标；新增/编辑正文传规范 Markdown，由工具渲染为 HTML。
 
 甄云盘古通用工具 MCP，供任意 MCP 客户端（Claude Desktop / Cursor / 各类 agent）复用。
 
 跨 agent 接入、通用导出命令和本轮协作优化见 [WORKFLOW_OPTIMIZATION.md](WORKFLOW_OPTIMIZATION.md)。
 
-猪齿鱼评论格式说明：`choerodon_add_comment` 接收规范 Markdown，但接口写入的
+猪齿鱼评论格式说明：`choerodon_add_comment` / `choerodon_update_comment` 接收规范 Markdown，但接口写入的
 `commentText` 是统一渲染后的 HTML 富文本。Markdown 表格会转换为 `<table>`，代码块
 会转换为 `<pre><code class="language-xxx">`；因此从评论区复制代码时不会带回 Markdown
 的 ``` 围栏，这是浏览器复制 HTML 内容的正常表现。不要在同一条评论中手工拼接 HTML 和
@@ -58,7 +58,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` | 数据能力（Archery 双站点 cn/aws + 盘古专属租户/库/实例能力）；`archery_query_tenant` 必须传 tenant，不支持空参列举 |
 | `es_*` | `es_search` / `es_count` / `es_get` | 工作台 ES 的 prod/dev/test 只读查询；禁止写入，单次最多返回 `ES_MAX_SIZE` 条 |
 | 脚本身份发现 | `search_adapter_scripts` / `search_standalone_scripts` | 只按租户、服务、编码或描述发现候选；命中后使用 `zhenyun-script-platform-mcp` 的 `adapter_get` / `independent_script_get` 读取权威当前态 |
-| `choerodon_*` | `choerodon_list_projects` / `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_add_comment` | 业务系统能力：猪齿鱼协作（可按 ID/名称/编码发现当前账号可访问项目；前 9 个为只读查询，`choerodon_add_comment` 为写操作，需确认） |
+| `choerodon_*` | `choerodon_list_projects` / `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_preview_comment` / `choerodon_add_comment` / `choerodon_update_comment` / `choerodon_delete_comment` | 业务系统能力：猪齿鱼协作；评论预览为离线只读，新增、按版本编辑和删除是写操作，需明确授权并预览完整内容 |
 | `gitlab_*` | `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 仅对已知 project/ref/path 做精确读取；`gitlab_search_projects/code` 默认不注册，避免失败后回退 |
 | `search_repo` | `search_repo` | 普通代码检索的默认入口：跨本地代码仓库搜索（内容 / 文件名 / 模块结构） |
 
@@ -237,16 +237,12 @@ uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
 
 ## 输出与错误规范（Agent 可据此判断）
 
-**成功返回**：各工具返回 JSON 字符串，尽量包含 `summary / total / results` 等摘要 + 关键结果，避免一次性返回数千行吃 Agent Context：
+**成功返回**：结构化工具返回 JSON 字符串，认知层工具按设计返回可读 Markdown。结构化结果尽量包含 `summary / total / results` 等摘要 + 关键结果，避免一次性返回数千行吃 Agent Context：
 - 日志查询：`obs_log_query` / `obs_log_trace` 返回 `total`（命中总数）+ 截断后的 `results`（按 `limit`），`obs_log_trace` 附 `meta.error_count / warn_count`，可用 `level=error` 省 token。
 - 数据查询：`archery_query` 返回行集与数量；查询大结果集建议缩小 `limit` 或用更精准 WHERE。
 - 脚本查询：Pangu 只返回 Adapter/Independent Script 候选身份；命中后用 Script Platform MCP 的
   `adapter_get` / `independent_script_get` 获取当前正文、版本和 Fixture。
 
-**失败返回**：工具异常一律返回 `{"error": "<原因>"}` 的 JSON 字符串，不抛 500。常见原因：
-- `参数错误`：site/instance/db/query 取值非法（如未知 region）。
-- `权限错误`：Archery/Grafana/SLS 凭据缺失、过期或无权。
-- `连接错误 / 查询超时`：网络或时间窗过宽（缩小时间范围重试）。
-- `数据不存在`：查询无结果。
+**失败返回**：结构化工具返回 `{"ok": false, "error": {"code": "...", "message": "...", "retryable": true|false}}`；认知层工具按设计返回可读 Markdown。Archery/SLS 的参数错误和缺失配置返回 `retryable=false`，需要先修正输入或配置；网络等临时后端错误可能为 `true`。空结果是成功响应，不代表工具失败。
 
-> Agent 应根据 `error` 字段判断失败原因并调整参数后重试，不要用相同参数原样重调。
+Archery 工具的 `site` Schema 限定为 `cn` / `aws`，默认 `cn`；省略 `instance` 使用该站点的默认实例。`archery_query_tenant` 的 `tenant` 是必填参数。ES 环境和 `search_repo.mode` 也通过 Schema 暴露为有限选项，客户端可在调用前校验常见拼写错误。

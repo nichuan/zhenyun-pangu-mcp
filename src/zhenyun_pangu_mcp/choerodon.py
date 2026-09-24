@@ -27,6 +27,7 @@ import re
 import tempfile
 import time
 from typing import Any, Optional
+from urllib.parse import quote
 
 import requests
 from cryptography.hazmat.backends import default_backend
@@ -206,7 +207,7 @@ def _headers(token: str, content_type: bool = False) -> dict:
     h = {
         "Accept": "application/json",
         "Authorization": f"bearer {token}",
-        "H-Menu-Id": "0",
+        "H-Menu-Id": config.CHOERODON_MENU_ID,
         "H-Tenant-Id": TENANT_ID,
         "User-Agent": UA,
     }
@@ -848,6 +849,11 @@ def _to_html_comment(text: str) -> str:
     return _md_to_html(t)
 
 
+def preview_issue_comment(comment: str) -> dict:
+    """离线预览实际提交给猪齿鱼的完整 HTML 正文。"""
+    return {"markdown": comment, "commentText": _to_html_comment(comment)}
+
+
 def list_issue_comments(issue_id: str, size: int = 100, project_id: str | None = None) -> dict:
     """查询猪齿鱼任务的评论列表(按时间倒序,最近在前)。
 
@@ -863,6 +869,7 @@ def list_issue_comments(issue_id: str, size: int = 100, project_id: str | None =
             "author": str(c.get("userRealName") or c.get("userName") or ""),
             "loginName": str(c.get("userLoginName") or ""),
             "content": str(c.get("commentText") or c.get("htmlContent") or ""),
+            "objectVersionNumber": c.get("objectVersionNumber"),
             "updatedAt": str(c.get("lastUpdateDate") or ""),
         }
         for c in _list(data)
@@ -897,6 +904,62 @@ def create_issue_comment(issue_id: str, comment: str, project_id: str | None = N
     }
 
 
+def _comment_in_issue(issue_id: str, comment_id: str, project_id: str) -> dict:
+    """只允许操作能在目标任务评论列表中精确找到的评论。"""
+    if not issue_id or not comment_id:
+        raise ChoerodonError("issue_id 和 comment_id 不能为空")
+    comments = list_issue_comments(issue_id, size=200, project_id=project_id)["comments"]
+    matches = [item for item in comments if item["commentId"] == comment_id]
+    if len(matches) != 1:
+        raise ChoerodonError("目标评论不在该任务的当前评论列表中；未执行写入")
+    return matches[0]
+
+
+def update_issue_comment(issue_id: str, comment_id: str, object_version_number: int,
+                         comment: str, project_id: str | None = None) -> dict:
+    """以当前版本编辑本人评论；正文沿用新增评论的 Markdown 渲染规则。"""
+    pid = project_id or DEFAULT_PROJECT_ID
+    html_content = _to_html_comment(comment)
+    current = _comment_in_issue(issue_id, comment_id, pid)
+    try:
+        expected_version = int(object_version_number)
+        actual_version = int(current["objectVersionNumber"])
+    except (TypeError, ValueError) as e:
+        raise ChoerodonError("评论版本缺失或无效；请重新读取评论") from e
+    if expected_version != actual_version:
+        raise ChoerodonError("评论版本已变化；请重新读取并预览完整正文")
+    body = {
+        "commentId": comment_id,
+        "objectVersionNumber": expected_version,
+        "commentText": html_content,
+    }
+    _request("POST", f"/agile/v1/projects/{pid}/issue_comment/self/update", json_body=body)
+    return {
+        "ok": True, "commentId": comment_id, "issueId": issue_id,
+        "commentText": html_content, "note": "评论编辑请求已提交；请回读确认最终正文。",
+    }
+
+
+def delete_issue_comment(issue_id: str, comment_id: str, object_version_number: int,
+                         project_id: str | None = None) -> dict:
+    """删除目标任务中精确定位的本人评论。"""
+    pid = project_id or DEFAULT_PROJECT_ID
+    current = _comment_in_issue(issue_id, comment_id, pid)
+    try:
+        expected_version = int(object_version_number)
+        actual_version = int(current["objectVersionNumber"])
+    except (TypeError, ValueError) as e:
+        raise ChoerodonError("评论版本缺失或无效；请重新读取评论") from e
+    if expected_version != actual_version:
+        raise ChoerodonError("评论版本已变化；请重新读取并确认删除目标")
+    encoded_id = quote(comment_id, safe="")
+    _request("DELETE", f"/agile/v1/projects/{pid}/issue_comment/self/{encoded_id}")
+    return {
+        "ok": True, "commentId": comment_id, "issueId": issue_id,
+        "note": "评论删除请求已提交；请回读确认。",
+    }
+
+
 # 工具名 -> 处理函数映射(供 server.py 调用,返回 dict)
 CHOERODON_DISPATCH = {
     "list_projects": list_projects,
@@ -909,7 +972,12 @@ CHOERODON_DISPATCH = {
     "list_attachments": list_attachments,
     "download_attachment": download_attachment,
     "list_comments": lambda issue_id, size=100, project_id=None: list_issue_comments(issue_id, size, project_id),
+    "preview_comment": preview_issue_comment,
     "create_comment": lambda issue_id, comment, project_id=None: create_issue_comment(issue_id, comment, project_id),
+    "update_comment": lambda issue_id, comment_id, object_version_number, comment, project_id=None:
+        update_issue_comment(issue_id, comment_id, object_version_number, comment, project_id),
+    "delete_comment": lambda issue_id, comment_id, object_version_number, project_id=None:
+        delete_issue_comment(issue_id, comment_id, object_version_number, project_id),
 }
 
 

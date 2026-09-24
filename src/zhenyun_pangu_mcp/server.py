@@ -122,6 +122,14 @@ def _err(code: str, message: str, retryable: bool = False) -> str:
     })
 
 
+def _archery_failure(
+    error: archery.ArcheryError, fallback_code: str = "archery_query"
+) -> str:
+    """保留 Archery 参数错误与临时后端错误的重试区别。"""
+    code = error.code if error.code != "archery_query" else fallback_code
+    return _err(code, str(error), retryable=error.retryable)
+
+
 def _ok(data: object, source: str) -> str:
     """统一成功响应：保留业务字段，顶层补充 ok=true 与 meta。"""
     if isinstance(data, dict):
@@ -253,7 +261,7 @@ def _check_loki_region(region: str) -> str | None:
 @_tool()
 def obs_log_query(
     region: str = "aws",
-    env: str = "nonprod",
+    env: Literal["prod", "nonprod", "ops"] = "nonprod",
     query: str = "",
     time_range: str = "2h",
     from_time: int | None = None,
@@ -320,7 +328,7 @@ def obs_log_query(
 def obs_log_trace(
     trace_id: str,
     region: str = "aws",
-    env: str = "nonprod",
+    env: Literal["prod", "nonprod", "ops"] = "nonprod",
     time_range: str = "2h",
     from_time: int | None = None,
     to_time: int | None = None,
@@ -392,12 +400,12 @@ def obs_log_datasources(region: str = "aws") -> str:
 @_tool()
 def archery_query(
     sql: str,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
     limit: int = 100,
 ) -> str:
-    """执行 Archery 只读 SQL；site 必须为 cn/aws，支持单条 SELECT/EXPLAIN SELECT/SHOW CREATE TABLE、CASE 表达式、IN 值列表及白名单无副作用函数，拒绝子查询、窗口、多语句、注释和写入。"""
+    """执行 Archery 只读 SQL；site 仅接受 cn/aws，省略时默认 cn；支持 SELECT、CASE、IN 和白名单函数，拒绝子查询、窗口、多语句、注释和写入。"""
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
@@ -405,13 +413,13 @@ def archery_query(
         result = client.query(sql, instance_name, db_name, max(1, min(int(limit), 5000)))
         return _ok({"site": site, "instance": instance_name, "db": db_name, **result}, "archery")
     except archery.ArcheryError as e:
-        return _err("archery_query", str(e), retryable=True)
+        return _archery_failure(e)
 
 
 @_tool()
 def archery_describe_table(
     table: str,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
@@ -423,13 +431,13 @@ def archery_describe_table(
         result = client.describe_table(instance_name, db_name, table)
         return _ok({"site": site, "instance": instance_name, "db": db_name, **result}, "archery")
     except archery.ArcheryError as e:
-        return _err("archery_query", str(e), retryable=True)
+        return _archery_failure(e)
 
 
 @_tool()
 def archery_list_columns(
     table: str,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
@@ -441,31 +449,31 @@ def archery_list_columns(
         columns = client.list_columns(instance_name, db_name, table)
         return _ok({"site": site, "instance": instance_name, "db": db_name, "table": table, "columns": columns}, "archery")
     except archery.ArcheryError as e:
-        return _err("archery_query", str(e), retryable=True)
+        return _archery_failure(e)
 
 
 @_tool()
 def archery_query_tenant(
-    tenant: str = "",
-    site: str = "cn",
+    tenant: str,
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
-    """按必填 tenant 查询 hpfm_tenant 的租户信息；site 必须为 cn/aws，空参返回参数错误，不执行全表列举。"""
+    """按必填 tenant 查询 hpfm_tenant；site 仅接受 cn/aws，省略时默认 cn；空 tenant 返回参数错误，不执行全表列举。"""
     if not tenant or not tenant.strip():
-        return _err("archery_query_tenant", "tenant 必填：请传租户编码或名称，不支持空参列举租户")
+        return _err("bad_param", "tenant 必填：请传租户编码或名称，不支持空参列举租户")
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
         result = archery.query_tenant(site, tenant or None, instance_name, db_name)
         return _ok({"site": site, "instance": instance_name, "db": db_name, **result}, "archery")
     except archery.ArcheryError as e:
-        return _err("archery_query", str(e), retryable=True)
+        return _archery_failure(e)
 
 
 @_tool()
 def archery_list_databases(
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
 ) -> str:
     """列出指定 Archery 实例数据库；这是固定只读发现能力，不开放任意 SHOW，返回 JSON ok 或 error.retryable。"""
@@ -474,7 +482,7 @@ def archery_list_databases(
         result = archery.query_db_list(site, instance_name)
         return _ok({"site": site, "instance": instance_name, **result}, "archery")
     except archery.ArcheryError as e:
-        return _err("archery_query", str(e), retryable=True)
+        return _archery_failure(e)
 
 
 @_tool()
@@ -521,7 +529,7 @@ def inspect_object_relation(
     source_field: str,
     target_object: str,
     target_field: str,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
     sample_limit: int = 5,
@@ -588,8 +596,10 @@ def inspect_object_relation(
                 "至少一个字段不存在，停止从对象中直接取值；请重新确认对象、字段或关联路径。"
             ),
         }, "archery")
-    except (ValueError, archery.ArcheryError) as e:
-        return _err("object_relation", str(e), retryable=isinstance(e, archery.ArcheryError))
+    except archery.ArcheryError as e:
+        return _archery_failure(e, "object_relation")
+    except ValueError as e:
+        return _err("bad_param", str(e), retryable=False)
 
 
 # ============================================================================
@@ -605,8 +615,9 @@ def _choerodon_call(dispatch_name: str, **kwargs) -> str:
             return _err("choerodon", data.get("note") or str(data), retryable=False)
         return _ok(data, "choerodon")
     except choerodon.ChoerodonError as e:
-        # 认证/网络/解析等可重试错误
-        return _err("choerodon", str(e), retryable=True)
+        # 写请求可能已到达服务端；结果不确定时先回读，不自动重试。
+        retryable = dispatch_name not in {"create_comment", "update_comment", "delete_comment"}
+        return _err("choerodon", str(e), retryable=retryable)
     except Exception as e:  # 其它未知异常,不抛 500
         return _err("choerodon", f"{type(e).__name__}: {e}", retryable=False)
 
@@ -675,9 +686,40 @@ def choerodon_list_comments(issue_id: str, size: int = 100, project_id: str = ""
 
 
 @_tool()
+def choerodon_preview_comment(comment: str) -> str:
+    """离线返回完整 Markdown 与将提交的 HTML 评论正文；只读，可用于最终内容确认。"""
+    return _choerodon_call("preview_comment", comment=comment)
+
+
+@_tool()
 def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> str:
-    """向猪齿鱼写入规范 Markdown 评论；真实副作用，必须先确认内容，返回 JSON ok 或 error.retryable。"""
+    """向猪齿鱼写入规范 Markdown 评论；真实副作用，必须先确认完整内容。"""
     return _choerodon_call("create_comment", issue_id=issue_id, comment=comment, project_id=project_id or None)
+
+
+@_tool()
+def choerodon_update_comment(
+    issue_id: str, comment_id: str, object_version_number: int,
+    comment: str, project_id: str = "",
+) -> str:
+    """按评论 ID 和已读取版本编辑本人评论；写入前须展示完整 Markdown 正文并获明确授权。"""
+    return _choerodon_call(
+        "update_comment", issue_id=issue_id, comment_id=comment_id,
+        object_version_number=object_version_number, comment=comment,
+        project_id=project_id or None,
+    )
+
+
+@_tool()
+def choerodon_delete_comment(
+    issue_id: str, comment_id: str, object_version_number: int, project_id: str = "",
+) -> str:
+    """按评论 ID 和已读取版本删除本人评论；真实删除须明确授权并确认评论身份。"""
+    return _choerodon_call(
+        "delete_comment", issue_id=issue_id, comment_id=comment_id,
+        object_version_number=object_version_number,
+        project_id=project_id or None,
+    )
 
 
 # ============================================================================
@@ -687,7 +729,7 @@ def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> 
 @_tool()
 def search_repo(
     keyword: str,
-    mode: str = "content",
+    mode: Literal["content", "filename", "modules"] = "content",
     max_results: int = 30,
     context: int = 2,
     depth: int = 4,
@@ -712,7 +754,7 @@ def search_adapter_scripts(
     running_service: str = "",
     query: str = "",
     enabled_only: bool = True,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
     limit: int = 20,
@@ -733,7 +775,7 @@ def search_adapter_scripts(
         )
         return _ok(data, "adapter-script")
     except archery.ArcheryError as e:
-        return _err("adapter_script_query", str(e), retryable=True)
+        return _archery_failure(e, "adapter_script_query")
     except adapter_scripts.AdapterScriptError as e:
         return _err("adapter_script", str(e), retryable=False)
 
@@ -746,7 +788,7 @@ _advertise_nonempty_any_of(
 @_legacy_script_read_tool()
 def get_adapter_script_info(
     script_id: int,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
@@ -756,7 +798,7 @@ def get_adapter_script_info(
             script_id, site=site, instance=instance, db=db,
         ), "adapter-script")
     except archery.ArcheryError as e:
-        return _err("adapter_script_query", str(e), retryable=True)
+        return _archery_failure(e, "adapter_script_query")
     except adapter_scripts.AdapterScriptError as e:
         return _err("adapter_script", str(e), retryable=False)
 
@@ -767,7 +809,7 @@ def get_adapter_script_source(
     start_line: int = 1,
     end_line: int = 0,
     full: bool = False,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
@@ -783,7 +825,7 @@ def get_adapter_script_source(
             db=db,
         ), "adapter-script")
     except archery.ArcheryError as e:
-        return _err("adapter_script_query", str(e), retryable=True)
+        return _archery_failure(e, "adapter_script_query")
     except adapter_scripts.AdapterScriptError as e:
         return _err("adapter_script", str(e), retryable=False)
 
@@ -796,7 +838,7 @@ def search_adapter_script_source(
     max_matches: int = 20,
     regex: bool = False,
     case_sensitive: bool = False,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
@@ -814,7 +856,7 @@ def search_adapter_script_source(
             db=db,
         ), "adapter-script")
     except archery.ArcheryError as e:
-        return _err("adapter_script_query", str(e), retryable=True)
+        return _archery_failure(e, "adapter_script_query")
     except adapter_scripts.AdapterScriptError as e:
         return _err("adapter_script", str(e), retryable=False)
 
@@ -827,7 +869,7 @@ def search_adapter_script_source(
 def search_standalone_scripts(
     tenant: str = "",
     query: str = "",
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
     limit: int = 20,
@@ -846,7 +888,7 @@ def search_standalone_scripts(
         )
         return _ok(data, "standalone-script")
     except archery.ArcheryError as e:
-        return _err("standalone_script_query", str(e), retryable=True)
+        return _archery_failure(e, "standalone_script_query")
     except standalone_scripts.AdapterScriptError as e:
         return _err("standalone_script", str(e), retryable=False)
 
@@ -857,7 +899,7 @@ _advertise_nonempty_any_of("search_standalone_scripts", "tenant", "query")
 @_legacy_script_read_tool()
 def get_standalone_script_info(
     script_id: int,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
@@ -867,7 +909,7 @@ def get_standalone_script_info(
             script_id, site=site, instance=instance, db=db,
         ), "standalone-script")
     except archery.ArcheryError as e:
-        return _err("standalone_script_query", str(e), retryable=True)
+        return _archery_failure(e, "standalone_script_query")
     except standalone_scripts.AdapterScriptError as e:
         return _err("standalone_script", str(e), retryable=False)
 
@@ -878,7 +920,7 @@ def get_standalone_script_source(
     start_line: int = 1,
     end_line: int = 0,
     full: bool = False,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
@@ -894,7 +936,7 @@ def get_standalone_script_source(
             db=db,
         ), "standalone-script")
     except archery.ArcheryError as e:
-        return _err("standalone_script_query", str(e), retryable=True)
+        return _archery_failure(e, "standalone_script_query")
     except standalone_scripts.AdapterScriptError as e:
         return _err("standalone_script", str(e), retryable=False)
 
@@ -907,7 +949,7 @@ def search_standalone_script_source(
     max_matches: int = 20,
     regex: bool = False,
     case_sensitive: bool = False,
-    site: str = "cn",
+    site: Literal["cn", "aws"] = "cn",
     instance: str | None = None,
     db: str | None = None,
 ) -> str:
@@ -925,7 +967,7 @@ def search_standalone_script_source(
             db=db,
         ), "standalone-script")
     except archery.ArcheryError as e:
-        return _err("standalone_script_query", str(e), retryable=True)
+        return _archery_failure(e, "standalone_script_query")
     except standalone_scripts.AdapterScriptError as e:
         return _err("standalone_script", str(e), retryable=False)
 
@@ -1107,30 +1149,37 @@ def obs_sls_query(
         if container and not re.fullmatch(r"[A-Za-z0-9._-]+", container):
             raise ValueError("container_name 只能包含字母、数字、点、下划线和连字符")
         target = sls_config.resolve_target(system, environment)
-        ak_id, ak_secret = sls_config.credentials(target)
         limit = _bounded_limit(limit, 500)
         start, end = _validate_time_bounds(
             *_time_bounds(from_time or None, to_time or None, time_range)
         )
+    except ValueError as e:
+        return _err("bad_param", str(e), retryable=False)
 
-        normalized_range = (time_range or "").strip().lower().replace(" ", "")
-        explicit_window = bool(from_time or to_time) or normalized_range not in _DEFAULT_SLS_RANGES
-        windows = [(start, end)]
-        if auto_expand and not explicit_window:
-            windows.extend([(end - hours * 3600, end) for hours in _EXPAND_WINDOWS_HOURS])
+    try:
+        ak_id, ak_secret = sls_config.credentials(target)
+    except RuntimeError as e:
+        return _err("config", str(e), retryable=False)
 
-        clauses = [f"_namespace_: {target.namespace}"]
-        if container:
-            clauses.append(f"_container_name_: {container}")
-        if level:
-            clauses.append(f"level: {level}")
-        if keyword:
-            clauses.append(keyword)
-        query = " AND ".join(clauses)
+    normalized_range = (time_range or "").strip().lower().replace(" ", "")
+    explicit_window = bool(from_time or to_time) or normalized_range not in _DEFAULT_SLS_RANGES
+    windows = [(start, end)]
+    if auto_expand and not explicit_window:
+        windows.extend([(end - hours * 3600, end) for hours in _EXPAND_WINDOWS_HOURS])
 
-        attempted_windows: list[dict] = []
-        logs: list[dict] = []
-        progress = "Complete"
+    clauses = [f"_namespace_: {target.namespace}"]
+    if container:
+        clauses.append(f"_container_name_: {container}")
+    if level:
+        clauses.append(f"level: {level}")
+    if keyword:
+        clauses.append(keyword)
+    query = " AND ".join(clauses)
+
+    attempted_windows: list[dict] = []
+    logs: list[dict] = []
+    progress = "Complete"
+    try:
         for window_start, window_end in windows:
             attempted_windows.append({"from_time": window_start, "to_time": window_end})
             if trace_id:
@@ -1150,26 +1199,26 @@ def obs_sls_query(
                 query_used = query
             if logs or progress == "Incomplete":
                 break
-
-        used_start, used_end = attempted_windows[-1]["from_time"], attempted_windows[-1]["to_time"]
-        return _ok({
-            "meta": {
-                "system": target.system, "environment": target.environment,
-                "project": target.project, "logstore": target.logstore,
-                "namespace": target.namespace,
-                "container_name": container or None,
-                "from_time": used_start, "to_time": used_end,
-                "from_time_bj": datetime.fromtimestamp(used_start, BJ).strftime("%Y-%m-%d %H:%M:%S"),
-                "to_time_bj": datetime.fromtimestamp(used_end, BJ).strftime("%Y-%m-%d %H:%M:%S"),
-                "query": query_used, "progress": progress, "count": len(logs),
-                "auto_expanded": len(attempted_windows) > 1,
-                "attempted_windows": attempted_windows,
-                "clip_len": clip_len,
-            },
-            "logs": _clip_logs(logs, clip_len),
-        }, "sls")
-    except (ValueError, RuntimeError) as e:
+    except RuntimeError as e:
         return _err("sls_query", str(e), retryable=True)
+
+    used_start, used_end = attempted_windows[-1]["from_time"], attempted_windows[-1]["to_time"]
+    return _ok({
+        "meta": {
+            "system": target.system, "environment": target.environment,
+            "project": target.project, "logstore": target.logstore,
+            "namespace": target.namespace,
+            "container_name": container or None,
+            "from_time": used_start, "to_time": used_end,
+            "from_time_bj": datetime.fromtimestamp(used_start, BJ).strftime("%Y-%m-%d %H:%M:%S"),
+            "to_time_bj": datetime.fromtimestamp(used_end, BJ).strftime("%Y-%m-%d %H:%M:%S"),
+            "query": query_used, "progress": progress, "count": len(logs),
+            "auto_expanded": len(attempted_windows) > 1,
+            "attempted_windows": attempted_windows,
+            "clip_len": clip_len,
+        },
+        "logs": _clip_logs(logs, clip_len),
+    }, "sls")
 
 
 _SCRIPT_TRACE_STAGE_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -1563,7 +1612,12 @@ _advertise_nonempty_any_of(
 # ============================================================================
 
 @_tool()
-def es_search(index: str, dsl: str = "", size: int = 10, env: str = "prod") -> str:
+def es_search(
+    index: str,
+    dsl: str = "",
+    size: int = 10,
+    env: Literal["prod", "dev", "test"] = "prod",
+) -> str:
     """在指定环境执行 ES 只读 _search；禁止写入且单次最多返回 ES_MAX_SIZE 条，返回 JSON ok 或 error.retryable。"""
     try:
         client = es.get_client(env)
@@ -1577,7 +1631,11 @@ def es_search(index: str, dsl: str = "", size: int = 10, env: str = "prod") -> s
 
 
 @_tool()
-def es_count(index: str, dsl: str = "", env: str = "prod") -> str:
+def es_count(
+    index: str,
+    dsl: str = "",
+    env: Literal["prod", "dev", "test"] = "prod",
+) -> str:
     """统计指定环境 ES 文档数；只读 _count，不受返回条数上限影响，返回 JSON ok 或 error.retryable。"""
     try:
         client = es.get_client(env)
@@ -1593,7 +1651,11 @@ def es_count(index: str, dsl: str = "", env: str = "prod") -> str:
 
 
 @_tool()
-def es_get(index: str, doc_id: str, env: str = "prod") -> str:
+def es_get(
+    index: str,
+    doc_id: str,
+    env: Literal["prod", "dev", "test"] = "prod",
+) -> str:
     """读取指定环境 ES 单个文档；只读 _source，返回 JSON ok 或 error.retryable。"""
     try:
         client = es.get_client(env)

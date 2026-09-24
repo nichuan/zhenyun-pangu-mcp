@@ -25,7 +25,25 @@ from .config import (
 
 
 class ArcheryError(Exception):
-    """Archery 查询/认证错误。"""
+    """Archery 错误，带可供 Agent 处理的错误分类。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "archery_query",
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
+class ArcheryParameterError(ArcheryError):
+    """调用参数或 SQL 语法错误；修正输入前重试不会改变结果。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="bad_param", retryable=False)
 
 
 # 同一 MCP 进程内按站点复用登录态，避免每次工具调用都重新登录。
@@ -63,7 +81,7 @@ def _sql_code(sql: str) -> str:
     误判，字符串外的注释、语句分隔符和未授权的括号结构会被拒绝。
     """
     if not isinstance(sql, str) or not sql.strip():
-        raise ArcheryError("SQL 不能为空")
+        raise ArcheryParameterError("SQL 不能为空")
 
     code: list[str] = []
     allowed_parens: list[str] = []
@@ -88,18 +106,18 @@ def _sql_code(sql: str) -> str:
                     break
                 i += 1
             else:
-                raise ArcheryError("SQL 包含未闭合的引号")
+                raise ArcheryParameterError("SQL 包含未闭合的引号")
             # 保留反引号标识符的占位符，便于校验 SHOW CREATE TABLE 的表名；
             # 字符串内容仍完全抹去，避免其中的关键字参与语法判断。
             code.append("__quoted_identifier__" if quote == "`" else " ")
             continue
         # 注释会隐藏后续语句或改变 WHERE 语义，用户 SQL 一律不允许。
         if sql.startswith("--", i) or ch == "#" or sql.startswith("/*", i):
-            raise ArcheryError("不允许使用 SQL 注释")
+            raise ArcheryParameterError("不允许使用 SQL 注释")
         if ch == ";":
             # 允许一个末尾语句 terminator，除此之外均视为多语句。
             if sql[i + 1 :].strip():
-                raise ArcheryError("仅允许单条只读 SQL，不能包含多条语句")
+                raise ArcheryParameterError("仅允许单条只读 SQL，不能包含多条语句")
             code.append(" ")
             i += 1
             continue
@@ -116,7 +134,7 @@ def _sql_code(sql: str) -> str:
                 # parentheses remain blocked by the checks below.
                 allowed_parens.append("in-list")
             else:
-                raise ArcheryError(
+                raise ArcheryParameterError(
                     "仅允许白名单无副作用函数、IN 值列表，不支持子查询或其它括号结构"
                 )
             code.append(ch)
@@ -124,7 +142,7 @@ def _sql_code(sql: str) -> str:
             continue
         if ch == ")":
             if not allowed_parens:
-                raise ArcheryError("括号结构不受支持；仅允许白名单函数和 IN 值列表")
+                raise ArcheryParameterError("括号结构不受支持；仅允许白名单函数和 IN 值列表")
             allowed_parens.pop()
             code.append(ch)
             i += 1
@@ -132,7 +150,7 @@ def _sql_code(sql: str) -> str:
         code.append(ch)
         i += 1
     if allowed_parens:
-        raise ArcheryError("SQL 包含未闭合的括号")
+        raise ArcheryParameterError("SQL 包含未闭合的括号")
     return "".join(code)
 
 
@@ -159,11 +177,11 @@ def validate_select_sql(sql: str) -> None:
         table_name = normalized[len(show_prefix) + 1 :]
         identifier = r"(?:[a-zA-Z_][a-zA-Z0-9_$-]*|__quoted_identifier__)"
         if not re.fullmatch(rf"{identifier}(?:\.{identifier})?", table_name):
-            raise ArcheryError("SHOW CREATE TABLE 后必须是单个表名")
+            raise ArcheryParameterError("SHOW CREATE TABLE 后必须是单个表名")
         return
 
     if not is_select and not is_explain_select:
-        raise ArcheryError(
+        raise ArcheryParameterError(
             "仅允许执行基础 SELECT、EXPLAIN SELECT 或 SHOW CREATE TABLE"
         )
 
@@ -172,12 +190,12 @@ def validate_select_sql(sql: str) -> None:
     # A SELECT token after the outer statement start would be a subquery or
     # malformed function argument; neither is part of the safe grammar.
     if re.search(r"\bselect\b", statement[len("select") :]):
-        raise ArcheryError(
+        raise ArcheryParameterError(
             "不支持子查询；仅允许外层基础 SELECT 与白名单无副作用函数"
         )
     for token in _UNSUPPORTED_SQL_TOKENS:
         if re.search(rf"\b{token}\b", statement):
-            raise ArcheryError(
+            raise ArcheryParameterError(
                 f"不支持的 SQL 语法：{token.upper()}（仅允许基础 SELECT、EXPLAIN SELECT 或 SHOW CREATE TABLE）"
             )
 
@@ -194,7 +212,7 @@ def is_write_sql(sql: str) -> bool:
 class ArcheryClient:
     def __init__(self, site: str = "cn", timeout: int = 60):
         if site not in ARCHERY_BASE_URLS:
-            raise ArcheryError(f"未知站点: {site}（可选 cn/aws）")
+            raise ArcheryParameterError(f"未知站点: {site}（可选 cn/aws）")
         self.site = site
         self.base_url = ARCHERY_BASE_URLS[site].rstrip("/")
         self.username, self.password = ARCHERY_CREDENTIALS[site]
@@ -214,7 +232,9 @@ class ArcheryClient:
             if not self.username or not self.password:
                 raise ArcheryError(
                     f"站点「{self.site}」未配置账号密码，请在 .env 设置 "
-                    f"{'ARCHERY_' if self.site == 'cn' else 'ARCHERY_AWS_'}USERNAME/PASSWORD"
+                    f"{'ARCHERY_' if self.site == 'cn' else 'ARCHERY_AWS_'}USERNAME/PASSWORD",
+                    code="config",
+                    retryable=False,
                 )
             login_url = urljoin(self.base_url + "/", "login/")
             auth_url = urljoin(self.base_url + "/", "authenticate/")
@@ -427,7 +447,7 @@ def resolve_instance(name: str | None, site: str, default: str) -> str:
         if other_site == site:
             continue
         if name in aliases:
-            raise ArcheryError(
+            raise ArcheryParameterError(
                 f"实例别名「{name}」属于 {other_site} 站点，但当前 site 为「{site}」。"
                 f"请显式指定 site=\"{other_site}\"（而非仅在 instance 传 \"{name}\"）。"
             )
@@ -451,13 +471,13 @@ def _client(site: str) -> ArcheryClient:
 def query_tenant(site: str, tenant: str | None, instance_name: str, db_name: str) -> dict:
     """查询 hpfm_tenant 租户信息。"""
     if not tenant or not tenant.strip():
-        raise ArcheryError("tenant 必填：请传租户编码或名称，不支持空参列举租户")
+        raise ArcheryParameterError("tenant 必填：请传租户编码或名称，不支持空参列举租户")
     client = _client(site)
     tenant = tenant.strip()
     # 该能力的 SQL 由服务端内部拼接，租户号/名称只接受常见业务编码字符，
     # 避免引号、注释和控制字符改变查询语义。
     if not re.fullmatch(r"[\w .:/-]{1,100}", tenant, flags=re.UNICODE):
-        raise ArcheryError("tenant 仅允许字母、数字、空格及 . : / - _ 字符")
+        raise ArcheryParameterError("tenant 仅允许字母、数字、空格及 . : / - _ 字符")
     escaped = tenant.replace("\\", "\\\\").replace("'", "''")
     sql = (
         f"SELECT tenant_id, tenant_num, tenant_name, enabled_flag "

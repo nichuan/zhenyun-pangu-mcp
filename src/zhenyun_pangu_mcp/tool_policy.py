@@ -18,6 +18,7 @@ READ_ONLY_TOOLS = frozenset({
     'choerodon_list_comments',
     'choerodon_list_issue',
     'choerodon_list_projects',
+    'choerodon_preview_comment',
     'choerodon_query_issue',
     'choerodon_search_tasks_by_person',
     'choerodon_search_users',
@@ -61,6 +62,8 @@ READ_ONLY_TOOLS = frozenset({
 WRITE_TOOLS = frozenset({
     'add_table_relation',
     'choerodon_add_comment',
+    'choerodon_update_comment',
+    'choerodon_delete_comment',
     'delete_knowledge',
     'delete_sql_template',
     'record_table_usage',
@@ -74,10 +77,11 @@ WRITE_TOOLS = frozenset({
 
 # Updates/upserts may replace existing content; additions/statistics are additive.
 DESTRUCTIVE_TOOLS = frozenset({
+    "choerodon_update_comment", "choerodon_delete_comment",
     "update_knowledge", "delete_knowledge", "update_sql_template",
     "delete_sql_template", "add_table_relation", "upsert_table_knowledge",
 })
-LOCAL_TOOLS = frozenset({"search_repo", "check_marmot_script_static", "get_workflow_guide"})
+LOCAL_TOOLS = frozenset({"search_repo", "check_marmot_script_static", "get_workflow_guide", "choerodon_preview_comment"})
 
 
 def tool_annotations(name: str) -> ToolAnnotations:

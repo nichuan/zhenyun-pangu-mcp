@@ -22,10 +22,14 @@ def test_client_visible_annotations_and_discovery_match():
     assert all(item is not None for item in by_name.values())
     assert by_name["archery_query"].readOnlyHint is True
     assert by_name["get_workflow_guide"].openWorldHint is False
-    for name in ("save_knowledge", "choerodon_add_comment", "record_template_usage", "record_table_usage"):
+    assert by_name["choerodon_preview_comment"].readOnlyHint is True
+    assert by_name["choerodon_preview_comment"].openWorldHint is False
+    for name in ("save_knowledge", "choerodon_add_comment", "choerodon_update_comment",
+                 "choerodon_delete_comment", "record_template_usage", "record_table_usage"):
         assert by_name[name].readOnlyHint is False
         assert by_name[name].idempotentHint is False
-    for name in ("delete_knowledge", "update_knowledge", "upsert_table_knowledge", "delete_sql_template"):
+    for name in ("delete_knowledge", "update_knowledge", "upsert_table_knowledge",
+                 "delete_sql_template", "choerodon_update_comment", "choerodon_delete_comment"):
         assert by_name[name].destructiveHint is True
 
 

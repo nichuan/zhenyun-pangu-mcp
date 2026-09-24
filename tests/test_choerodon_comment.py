@@ -15,6 +15,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from zhenyun_pangu_mcp import choerodon  # noqa: E402
 
 
+def test_comment_headers_use_configured_menu_id(monkeypatch):
+    monkeypatch.setattr(choerodon.config, "CHOERODON_MENU_ID", "menu-from-env")
+    assert choerodon._headers("test-token", content_type=True)["H-Menu-Id"] == "menu-from-env"
+
+
 # ---------------------------------------------------------------------------
 # _to_html_comment / _md_to_html：Markdown -> HTML
 # ---------------------------------------------------------------------------
@@ -41,6 +46,16 @@ def test_to_html_comment_rejects_plain_text():
 def test_to_html_comment_empty_raises():
     with pytest.raises(choerodon.ChoerodonError):
         choerodon._to_html_comment("  ")
+
+
+def test_preview_comment_contains_full_rendered_sql_without_network():
+    markdown = "## SQL\n\n```sql\nSELECT 1;\nUPDATE t SET x = 1 WHERE tenant_id = 1 AND id = 2;\n```"
+    with mock.patch.object(choerodon, "_request") as request:
+        preview = choerodon.preview_issue_comment(markdown)
+    request.assert_not_called()
+    assert preview["markdown"] == markdown
+    assert "SELECT 1;" in preview["commentText"]
+    assert "UPDATE t SET x = 1" in preview["commentText"]
 
 
 def test_md_to_html_heading():
@@ -193,6 +208,7 @@ def test_list_issue_comments_parses():
         return {
             "content": [
                 {"commentId": "c1", "userRealName": "张三", "commentText": "<p>已修复</p>",
+                 "objectVersionNumber": 3,
                  "lastUpdateDate": "2026-08-19 10:00:00"},
             ]
         }
@@ -203,6 +219,63 @@ def test_list_issue_comments_parses():
     assert res["total"] == 1
     assert res["comments"][0]["author"] == "张三"
     assert "已修复" in res["comments"][0]["content"]
+    assert res["comments"][0]["objectVersionNumber"] == 3
+
+
+def test_update_issue_comment_uses_current_version_and_full_html():
+    calls = []
+
+    def fake_request(method, path, *, params=None, json_body=None, data=None, timeout=30):
+        calls.append((method, path, json_body))
+        if method == "GET":
+            return {"content": [{"commentId": "c1", "objectVersionNumber": 2,
+                                 "commentText": "<p>旧内容</p>"}]}
+        return {}
+
+    with mock.patch.object(choerodon, "_request", side_effect=fake_request):
+        result = choerodon.update_issue_comment("issue-1", "c1", 2, "## 修正\n\n```sql\nSELECT 1;\nUPDATE t SET x = 1 WHERE tenant_id = 1 AND id = 2;\n```", "58")
+
+    assert result["ok"] is True
+    assert calls[-1][0:2] == ("POST", "/agile/v1/projects/58/issue_comment/self/update")
+    assert calls[-1][2]["commentId"] == "c1"
+    assert calls[-1][2]["objectVersionNumber"] == 2
+    assert "UPDATE t SET x = 1" in calls[-1][2]["commentText"]
+
+
+def test_update_issue_comment_rejects_stale_version_before_post():
+    with mock.patch.object(choerodon, "list_issue_comments", return_value={
+        "comments": [{"commentId": "c1", "objectVersionNumber": 3}]}) as listed, \
+         mock.patch.object(choerodon, "_request") as request:
+        with pytest.raises(choerodon.ChoerodonError, match="版本已变化"):
+            choerodon.update_issue_comment("issue-1", "c1", 2, "## 修正", "58")
+    listed.assert_called_once()
+    request.assert_not_called()
+
+
+def test_delete_issue_comment_checks_membership_and_escapes_id():
+    with mock.patch.object(choerodon, "list_issue_comments", return_value={
+        "comments": [{"commentId": "=a/b==", "objectVersionNumber": 1}]}), \
+         mock.patch.object(choerodon, "_request", return_value={}) as request:
+        result = choerodon.delete_issue_comment("issue-1", "=a/b==", 1, "58")
+    assert result["ok"] is True
+    assert request.call_args.args == ("DELETE", "/agile/v1/projects/58/issue_comment/self/%3Da%2Fb%3D%3D")
+
+
+def test_delete_issue_comment_rejects_wrong_issue_before_delete():
+    with mock.patch.object(choerodon, "list_issue_comments", return_value={"comments": []}), \
+         mock.patch.object(choerodon, "_request") as request:
+        with pytest.raises(choerodon.ChoerodonError, match="不在该任务"):
+            choerodon.delete_issue_comment("issue-1", "c1", 1, "58")
+    request.assert_not_called()
+
+
+def test_delete_issue_comment_rejects_stale_version():
+    with mock.patch.object(choerodon, "list_issue_comments", return_value={
+        "comments": [{"commentId": "c1", "objectVersionNumber": 2}]}), \
+         mock.patch.object(choerodon, "_request") as request:
+        with pytest.raises(choerodon.ChoerodonError, match="版本已变化"):
+            choerodon.delete_issue_comment("issue-1", "c1", 1, "58")
+    request.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +283,10 @@ def test_list_issue_comments_parses():
 # ---------------------------------------------------------------------------
 def test_dispatch_has_comment_tools():
     assert "list_comments" in choerodon.CHOERODON_DISPATCH
+    assert "preview_comment" in choerodon.CHOERODON_DISPATCH
     assert "create_comment" in choerodon.CHOERODON_DISPATCH
+    assert "update_comment" in choerodon.CHOERODON_DISPATCH
+    assert "delete_comment" in choerodon.CHOERODON_DISPATCH
 
 
 # ---------------------------------------------------------------------------
