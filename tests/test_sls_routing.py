@@ -177,6 +177,21 @@ def test_obs_sls_query_respects_explicit_window(monkeypatch):
     assert calls[0][1] - calls[0][0] == 3 * 86400
 
 
+def test_obs_sls_query_marks_limit_hit_as_potentially_truncated(monkeypatch):
+    monkeypatch.setattr(sls_config, "credentials", lambda target: ("ak-id", "ak-secret"))
+    monkeypatch.setattr(
+        sls, "query_sls",
+        lambda *_args: ([{"content": "first"}], "Complete"),
+    )
+
+    result = json.loads(server.obs_sls_query(
+        environment="dev", keyword="first", limit=1, auto_expand=False,
+    ))
+
+    assert result["meta"]["complete"] is False
+    assert result["meta"]["possibly_truncated"] is True
+
+
 def test_obs_sls_query_scopes_script_keyword_to_container(monkeypatch):
     calls = []
     monkeypatch.setattr(sls_config, "credentials", lambda target: ("ak-id", "ak-secret"))

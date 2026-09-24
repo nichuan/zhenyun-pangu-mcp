@@ -52,6 +52,35 @@ def test_hybrid_template_search_runs_keyword_and_semantic_concurrently(monkeypat
     assert "关键词" in result
 
 
+def test_semantic_failure_is_visible_without_discarding_keyword_results(monkeypatch):
+    monkeypatch.setattr(
+        service.repo, "search_knowledge_keyword",
+        lambda *_args, **_kwargs: [{"id": 1, "title": "订单规则"}],
+    )
+    monkeypatch.setattr(
+        service.repo, "search_knowledge_semantic",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("embedding offline")),
+    )
+
+    result = service.search_knowledge("订单", use_semantic=True)
+
+    assert "订单规则" in result
+    assert "语义检索失败" in result
+    assert "embedding offline" in result
+
+
+def test_keyword_failure_is_not_reported_as_empty_search(monkeypatch):
+    monkeypatch.setattr(
+        service.repo, "search_knowledge_keyword",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database offline")),
+    )
+
+    result = service.search_knowledge("订单", use_semantic=False)
+
+    assert "知识库操作失败" in result
+    assert "未检索到匹配知识" not in result
+
+
 def test_candidate_table_relations_are_loaded_concurrently(monkeypatch):
     search_barrier = threading.Barrier(3)
     relation_barrier = threading.Barrier(2)

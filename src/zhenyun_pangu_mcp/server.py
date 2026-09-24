@@ -1203,6 +1203,7 @@ def obs_sls_query(
         return _err("sls_query", str(e), retryable=True)
 
     used_start, used_end = attempted_windows[-1]["from_time"], attempted_windows[-1]["to_time"]
+    possibly_truncated = len(logs) >= limit
     return _ok({
         "meta": {
             "system": target.system, "environment": target.environment,
@@ -1213,6 +1214,12 @@ def obs_sls_query(
             "from_time_bj": datetime.fromtimestamp(used_start, BJ).strftime("%Y-%m-%d %H:%M:%S"),
             "to_time_bj": datetime.fromtimestamp(used_end, BJ).strftime("%Y-%m-%d %H:%M:%S"),
             "query": query_used, "progress": progress, "count": len(logs),
+            "complete": progress == "Complete" and not possibly_truncated,
+            "possibly_truncated": possibly_truncated,
+            "completeness_hint": (
+                "日志可能未返回完整；缩小时间窗或增加更精确的容器/关键字过滤。"
+                if progress != "Complete" or possibly_truncated else None
+            ),
             "auto_expanded": len(attempted_windows) > 1,
             "attempted_windows": attempted_windows,
             "clip_len": clip_len,
@@ -1308,6 +1315,12 @@ def query_script_trace(
             "query": query,
             "progress": progress,
             "count": len(timeline),
+            "complete": progress == "Complete" and len(logs) < limit,
+            "possibly_truncated": len(logs) >= limit,
+            "completeness_hint": (
+                "日志可能未返回完整；缩小时间窗或增加 script_code 过滤。"
+                if progress != "Complete" or len(logs) >= limit else None
+            ),
             "stage_counts": stage_counts,
             "timeline": timeline,
             "raw_included": include_raw,

@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import requests
+
 from .. import supabase_client as sb
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,18 @@ VALID_KNOWLEDGE_TYPES = (
 VALID_KNOWLEDGE_STATUS = ("draft", "verified", "deprecated", "archived")
 VALID_TEMPLATE_STATUS = ("draft", "verified", "trusted", "deprecated")
 VALID_RISK_LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+
+def _missing_rpc(exc: requests.HTTPError) -> bool:
+    """Only a missing PostgREST function permits the legacy REST fallback."""
+    response = exc.response
+    if response is None or response.status_code != 404:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("code") in {"PGRST202", "42883"}
 
 
 # =========================================================================== #
@@ -54,15 +68,11 @@ def search_knowledge_keyword(
     keyword: str, knowledge_type: str | None = None, system: str | None = None,
     module: str | None = None, status: str | None = None, limit: int = 10,
 ) -> list[dict[str, Any]]:
-    try:
-        return sb.rpc("search_knowledge_docs_keyword", {
-            "keyword": keyword, "match_count": limit,
-            "p_knowledge_type": knowledge_type, "p_system": system,
-            "p_module": module, "p_status": status,
-        })
-    except Exception as e:  # noqa: BLE001 - 失败降级为空
-        logger.warning("关键词检索知识失败：%s", e)
-        return []
+    return sb.rpc("search_knowledge_docs_keyword", {
+        "keyword": keyword, "match_count": limit,
+        "p_knowledge_type": knowledge_type, "p_system": system,
+        "p_module": module, "p_status": status,
+    })
 
 
 def search_knowledge_semantic(
@@ -73,16 +83,12 @@ def search_knowledge_semantic(
     if not sb.embedding.available:
         return []
     q_emb = sb.embedding.embed_query(query)
-    try:
-        return sb.rpc(sb.embedding.rpc_name("knowledge"), {
-            "query_embedding": sb.embedding.to_literal(q_emb),
-            "match_threshold": threshold if threshold is not None else sb.config.get_semantic_match_threshold(),
-            "match_count": limit, "p_knowledge_type": knowledge_type,
-            "p_system": system, "p_module": module, "p_status": status,
-        })
-    except Exception as e:  # noqa: BLE001
-        logger.warning("语义检索知识失败：%s", e)
-        return []
+    return sb.rpc(sb.embedding.rpc_name("knowledge"), {
+        "query_embedding": sb.embedding.to_literal(q_emb),
+        "match_threshold": threshold if threshold is not None else sb.config.get_semantic_match_threshold(),
+        "match_count": limit, "p_knowledge_type": knowledge_type,
+        "p_system": system, "p_module": module, "p_status": status,
+    })
 
 
 def list_knowledge(
@@ -144,7 +150,9 @@ def search_templates_keyword(
                 "p_business_domain": business_domain,
                 "p_verified_only": verified_only,
             })
-        except Exception as e:  # noqa: BLE001 - 兼容尚未执行新版 schema 的旧库
+        except requests.HTTPError as e:
+            if not _missing_rpc(e):
+                raise
             logger.warning("模板关键词 RPC 不可用，降级到 REST 过滤：%s", e)
             # 旧库没有 RPC 时至少扩大候选窗口；此前只取 limit 行再过滤会漏掉
             # 排在前面的不匹配记录之后的所有命中项。
@@ -157,24 +165,24 @@ def search_templates_keyword(
                 eq["business_domain"] = business_domain
             if verified_only:
                 eq["verified"] = True
-            try:
-                fetch_limit = min(max(limit * 20, 100), 500)
-                rows = sb.query_table(
-                    sb.config.SQL_TEMPLATE_TABLE, select="*", eq=eq,
-                    order="updated_at.desc", limit=fetch_limit,
+            fetch_limit = min(max(limit * 20, 100), 500)
+            rows = sb.query_table(
+                sb.config.SQL_TEMPLATE_TABLE, select="*", eq=eq,
+                order="updated_at.desc", limit=fetch_limit,
+            )
+            needle = kw.lower()
+            filtered = [
+                r for r in rows
+                if needle in (r.get("scenario") or "").lower()
+                or needle in (r.get("title") or "").lower()
+                or needle in " ".join(r.get("keywords") or []).lower()
+                or needle in " ".join(r.get("core_tables") or []).lower()
+            ]
+            if len(rows) == fetch_limit and len(filtered) < limit:
+                raise RuntimeError(
+                    "模板关键词 RPC 不存在，REST 候选扫描已达上限；结果不完整，请部署搜索 RPC"
                 )
-                needle = kw.lower()
-                filtered = [
-                    r for r in rows
-                    if needle in (r.get("scenario") or "").lower()
-                    or needle in (r.get("title") or "").lower()
-                    or needle in " ".join(r.get("keywords") or []).lower()
-                    or needle in " ".join(r.get("core_tables") or []).lower()
-                ]
-                return filtered[:limit]
-            except Exception as fallback_error:  # noqa: BLE001
-                logger.warning("模板关键词 REST 降级也失败：%s", fallback_error)
-                return []
+            return filtered[:limit]
     eq: dict[str, Any] = {}
     if category:
         eq["category"] = category
@@ -195,16 +203,12 @@ def search_templates_semantic(
     if not sb.embedding.available:
         return []
     q_emb = sb.embedding.embed_query(query)
-    try:
-        return sb.rpc(sb.embedding.rpc_name("template"), {
-            "query_embedding": sb.embedding.to_literal(q_emb),
-            "match_threshold": threshold if threshold is not None else sb.config.get_semantic_match_threshold(),
-            "match_count": limit, "p_category": category, "p_system": system,
-            "p_business_domain": business_domain, "p_verified_only": verified_only,
-        })
-    except Exception as e:  # noqa: BLE001
-        logger.warning("语义检索模板失败：%s", e)
-        return []
+    return sb.rpc(sb.embedding.rpc_name("template"), {
+        "query_embedding": sb.embedding.to_literal(q_emb),
+        "match_threshold": threshold if threshold is not None else sb.config.get_semantic_match_threshold(),
+        "match_count": limit, "p_category": category, "p_system": system,
+        "p_business_domain": business_domain, "p_verified_only": verified_only,
+    })
 
 
 def list_templates(

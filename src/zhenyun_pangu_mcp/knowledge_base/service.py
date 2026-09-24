@@ -37,6 +37,15 @@ def _run_independent(calls: dict[str, Callable[[], Any]]) -> dict[str, Any]:
         return {name: future.result() for name, future in futures.items()}
 
 
+def _optional_semantic(call: Callable[[], list[dict[str, Any]]]) -> tuple[list[dict[str, Any]], str | None]:
+    """Keep keyword results usable while making semantic failures visible."""
+    try:
+        return call(), None
+    except Exception as exc:  # noqa: BLE001 - optional remote search
+        logger.warning("语义检索失败：%s", exc)
+        return [], f"⚠️ 语义检索失败，本次结果仅来自关键词：{type(exc).__name__}: {exc}"
+
+
 def _relations_for_tables(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """批量读取候选表关系；同一张表只查询一次。"""
     table_names = list(dict.fromkeys(
@@ -204,22 +213,23 @@ def search_knowledge(
         searches = _run_independent({
             "keyword": lambda: repo.search_knowledge_keyword(kw, ktype, sys_v, mod, status, limit),
             **({
-                "semantic": lambda: repo.search_knowledge_semantic(
+                "semantic": lambda: _optional_semantic(lambda: repo.search_knowledge_semantic(
                     kw, ktype, sys_v, mod, status, limit=limit,
-                ),
+                )),
             } if use_semantic else {}),
         })
         keyword_rows = searches["keyword"]
-        semantic_rows: list[dict[str, Any]] = searches.get("semantic", [])
+        semantic_rows, semantic_warning = searches.get("semantic", ([], None))
+        suffix = f"\n\n{semantic_warning}" if semantic_warning else ""
         if semantic_rows:
             rows = repo.merge_by_id([r.get("id") for r in semantic_rows], semantic_rows, keyword_rows)[:limit]
             return (
                 f"🔍 混合检索到 {len(rows)} 条候选知识（语义 {len(semantic_rows)} + 关键词 {len(keyword_rows)}，已去重）"
-                f"（查询：{kw}）：\n\n" + "\n".join(fmt_knowledge(r, r.get("similarity")) for r in rows)
+                f"（查询：{kw}）：\n\n" + "\n".join(fmt_knowledge(r, r.get("similarity")) for r in rows) + suffix
             )
         if not keyword_rows:
-            return "🔍 未检索到匹配知识。可更换关键词/类型，或通过 save_knowledge 沉淀。"
-        return f"🔍 检索到 {len(keyword_rows)} 条候选知识（关键词：{kw}）：\n\n" + "\n".join(fmt_knowledge(r) for r in keyword_rows)
+            return "🔍 未检索到匹配知识。可更换关键词/类型，或通过 save_knowledge 沉淀。" + suffix
+        return f"🔍 检索到 {len(keyword_rows)} 条候选知识（关键词：{kw}）：\n\n" + "\n".join(fmt_knowledge(r) for r in keyword_rows) + suffix
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -243,22 +253,23 @@ def search_sql_templates(
                 kw, cat, sys_v, dom, verified_only, limit,
             ),
             **({
-                "semantic": lambda: repo.search_templates_semantic(
+                "semantic": lambda: _optional_semantic(lambda: repo.search_templates_semantic(
                     kw, cat, sys_v, dom, verified_only, limit=limit,
-                ),
+                )),
             } if use_semantic else {}),
         })
         keyword_rows = searches["keyword"]
-        semantic_rows: list[dict[str, Any]] = searches.get("semantic", [])
+        semantic_rows, semantic_warning = searches.get("semantic", ([], None))
+        suffix = f"\n\n{semantic_warning}" if semantic_warning else ""
         if semantic_rows:
             rows = repo.merge_by_id([r.get("id") for r in semantic_rows], semantic_rows, keyword_rows)[:limit]
             return (
                 f"🔍 混合检索到 {len(rows)} 条候选模板（语义 {len(semantic_rows)} + 关键词 {len(keyword_rows)}，已去重）"
-                f"（查询：{kw}）：\n\n" + "\n".join(fmt_template(r, r.get("similarity")) for r in rows)
+                f"（查询：{kw}）：\n\n" + "\n".join(fmt_template(r, r.get("similarity")) for r in rows) + suffix
             )
         if not keyword_rows:
-            return "🔍 未检索到匹配模板。可尝试更换关键词/分类。"
-        return f"🔍 检索到 {len(keyword_rows)} 条候选模板（关键词：{kw}）：\n\n" + "\n".join(fmt_template(r) for r in keyword_rows)
+            return "🔍 未检索到匹配模板。可尝试更换关键词/分类。" + suffix
+        return f"🔍 检索到 {len(keyword_rows)} 条候选模板（关键词：{kw}）：\n\n" + "\n".join(fmt_template(r) for r in keyword_rows) + suffix
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

@@ -86,7 +86,29 @@ def test_script_trace_builds_container_and_script_filters(monkeypatch):
     assert "_container_name_: srm-script-container" in result["query"]
     assert '"SCRIPT_CODE"' in result["query"]
     assert result["stage_counts"]["process_start"] == 1
+    assert result["complete"] is True
     assert calls["args"][4] == '"trace-1" AND _namespace_: namespace AND _container_name_: srm-script-container AND "SCRIPT_CODE"'
+
+
+def test_script_trace_marks_bounded_result_incomplete(monkeypatch):
+    monkeypatch.setattr(
+        server.sls_config,
+        "resolve_target",
+        lambda system, environment: SimpleNamespace(namespace="namespace", project="project", logstore="logstore"),
+    )
+    monkeypatch.setattr(server.sls_config, "credentials", lambda target: ("id", "secret"))
+    monkeypatch.setattr(server.sls_config, "endpoint", lambda: "endpoint")
+    monkeypatch.setattr(
+        server.sls, "query_sls",
+        lambda *_args: ([{"content": "process start"}], "Complete"),
+    )
+
+    result = json.loads(server.query_script_trace(
+        "trace-1", from_time=1769990000, to_time=1770001000, limit=1,
+    ))
+
+    assert result["complete"] is False
+    assert result["possibly_truncated"] is True
 
 
 def test_relation_returns_fields_and_join_sample(monkeypatch):
@@ -116,7 +138,7 @@ def test_relation_rejects_unsafe_identifier_before_backend_access():
     result = json.loads(server.inspect_object_relation("source;DROP", "id", "target", "id"))
 
     assert result["ok"] is False
-    assert result["error"]["code"] == "object_relation"
+    assert result["error"]["code"] == "bad_param"
 
 
 def test_new_delivery_tools_are_exposed():

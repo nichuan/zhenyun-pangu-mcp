@@ -3,6 +3,9 @@ import os
 import sys
 from types import SimpleNamespace
 
+import pytest
+import requests
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from zhenyun_pangu_mcp.knowledge_base import repository as repo  # noqa: E402
@@ -55,7 +58,10 @@ def test_template_keyword_search_keeps_server_side_matches_beyond_client_window(
 
 def test_template_keyword_search_legacy_fallback_scans_more_than_limit(monkeypatch):
     def unavailable(*_args, **_kwargs):
-        raise RuntimeError("old schema")
+        response = requests.Response()
+        response.status_code = 404
+        response._content = b'{"code":"PGRST202"}'
+        raise requests.HTTPError("missing RPC", response=response)
 
     monkeypatch.setattr(repo.sb, "rpc", unavailable)
     rows = [
@@ -67,6 +73,48 @@ def test_template_keyword_search_legacy_fallback_scans_more_than_limit(monkeypat
     result = repo.search_templates_keyword("订单", limit=1)
 
     assert [row["id"] for row in result] == [2]
+
+
+def test_keyword_search_does_not_turn_rpc_failure_into_no_results(monkeypatch):
+    monkeypatch.setattr(repo.sb, "rpc", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    with pytest.raises(RuntimeError, match="offline"):
+        repo.search_knowledge_keyword("订单")
+
+
+def test_template_keyword_search_does_not_fallback_on_server_error(monkeypatch):
+    response = requests.Response()
+    response.status_code = 503
+    response._content = b'{"code":"PGRST003"}'
+    monkeypatch.setattr(
+        repo.sb, "rpc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            requests.HTTPError("database unavailable", response=response)
+        ),
+    )
+    monkeypatch.setattr(
+        repo.sb, "query_table",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not fall back")),
+    )
+
+    with pytest.raises(requests.HTTPError, match="database unavailable"):
+        repo.search_templates_keyword("订单")
+
+
+def test_template_keyword_legacy_scan_reports_incomplete_results(monkeypatch):
+    response = requests.Response()
+    response.status_code = 404
+    response._content = b'{"code":"PGRST202"}'
+    monkeypatch.setattr(
+        repo.sb, "rpc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            requests.HTTPError("missing RPC", response=response)
+        ),
+    )
+    monkeypatch.setattr(repo.sb, "query_table", lambda *_args, **_kwargs: [{"title": "other"}] * 100)
+
+    with pytest.raises(RuntimeError, match="结果不完整"):
+        repo.search_templates_keyword("订单", limit=1)
 
 
 def test_template_usage_is_incremented_by_rpc(monkeypatch):
