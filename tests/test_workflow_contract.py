@@ -21,6 +21,9 @@ def test_client_visible_annotations_and_discovery_match():
     by_name = {tool.name: tool.annotations for tool in advertised}
     assert all(item is not None for item in by_name.values())
     assert by_name["archery_query"].readOnlyHint is True
+    assert by_name["archery_workflow_sqlcheck"].readOnlyHint is True
+    assert by_name["archery_submit_workflow"].readOnlyHint is False
+    assert by_name["archery_submit_workflow"].idempotentHint is False
     assert by_name["get_workflow_guide"].openWorldHint is False
     assert by_name["choerodon_preview_comment"].readOnlyHint is True
     assert by_name["choerodon_preview_comment"].openWorldHint is False

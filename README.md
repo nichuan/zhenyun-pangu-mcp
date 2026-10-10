@@ -21,13 +21,13 @@
 >
 > **能力分类**（供 Agent 理解"何时用哪类工具"）：
 > - **认知层（知识/模板/表）**：`search_knowledge` / `get_knowledge` / `search_sql_templates` / `get_sql_template` / `search_tables` / `get_table` / `get_table_relations` / `search_pangu`（统一搜索）/ `diagnose_context`（组合诊断）
-> - **日志能力**：`obs_sls_query` / `obs_sls_targets`（国内公有云盘古 prod/dev/test，阿里云 SLS）/ `obs_log_query` / `obs_log_trace` / `obs_log_datasources`（AWS 海外，Loki）
-> - **数据能力**：`archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances`
+> - **日志能力**：`obs_sls_query` / `query_sql_trace` / `obs_sls_targets`（国内公有云盘古 prod/dev/test，阿里云 SLS）/ `obs_log_query` / `obs_log_trace` / `obs_log_datasources`（AWS 海外，Loki）
+> - **数据能力**：`archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` / `archery_resolve_workflow_target`
 > - **ES 只读能力**：`es_search` / `es_count` / `es_get`（prod/dev/test，未配置时返回明确降级提示）
 > - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，以只读查询为主，评论新增、编辑和删除为需授权的写操作）
 > - **代码与脚本能力**：`search_repo`（本地跨仓搜索）+ `search_adapter_scripts` / `search_standalone_scripts`（只发现脚本身份）+ 已知路径的 `gitlab_list_branches/list_tree/get_file` 精确读取。当前脚本正文统一由 Script Platform MCP 获取；GitLab 项目/代码搜索默认禁用。
 >
-> **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼查询类（`choerodon_*_issue` / `choerodon_list_*` / `choerodon_search_*` / `choerodon_get_*` / `choerodon_download_*`）、代码检索为**只读**，Agent 可自主调用。`archery_query` 的用户 SQL 允许单条 `SELECT`、`EXPLAIN SELECT`、`SHOW CREATE TABLE`；SELECT 支持 `CASE WHEN` 表达式、`IN (...)` / `NOT IN (...)` 值列表，以及 `COUNT`、`SUM`、`AVG`、`MIN`、`MAX`、`IFNULL`、`NULLIF`、`CONCAT`、`CONCAT_WS`、`CAST`。不支持其它 `SHOW/DESC`、`WITH`、子查询、多语句、注释、窗口函数、集合运算或任何写入语法；实例/库/表结构由专用工具提供。任何生产 INSERT/UPDATE/DELETE **不在本 MCP 提供**，统一由 Skill 生成 SQL 后交用户人工确认执行。认知层的 `search_*` / `get_*` / `diagnose_context` / `list_sql_templates` 为只读；`save_*`、`update_*`、`delete_*`、`add_table_relation`、`upsert_table_knowledge` 和使用统计工具会写入 knowledge_docs / sql_templates / table_catalog / table_relations 元数据，不影响业务数据，调用前应确认沉淀内容。`choerodon_add_comment`、`choerodon_update_comment` 和 `choerodon_delete_comment` 会真实修改猪齿鱼评论，须先确认完整最终正文或删除目标；新增/编辑正文传规范 Markdown，由工具渲染为 HTML。
+> **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼查询类（`choerodon_*_issue` / `choerodon_list_*` / `choerodon_search_*` / `choerodon_get_*` / `choerodon_download_*`）、代码检索为**只读**，Agent 可自主调用。`archery_query` 的用户 SQL 允许单条 `SELECT`、`EXPLAIN SELECT`、`SHOW CREATE TABLE`；SELECT 支持 JOIN、EXISTS、只读子查询、UNION、CASE、IN 值列表和白名单无副作用函数，也接受 SQL 开头的普通 Mapper 标记注释。仍拒绝其它 `SHOW/DESC`、`WITH`、多语句、可执行注释、窗口函数、非白名单函数或任何写入语法；实例/库/表结构由专用工具提供。本 MCP 不直接执行生产 INSERT/UPDATE/DELETE；用户明确要求提交数据修复工单时，只把已核验的 DML 交给 `archery_workflow_sqlcheck`，通过后用一次性凭证调用 `archery_submit_workflow` 创建审批工单，提交工单不等于执行 SQL。认知层的 `search_*` / `get_*` / `diagnose_context` / `list_sql_templates` 为只读；`save_*`、`update_*`、`delete_*`、`add_table_relation`、`upsert_table_knowledge` 和使用统计工具会写入 knowledge_docs / sql_templates / table_catalog / table_relations 元数据，不影响业务数据，调用前应确认沉淀内容。`choerodon_add_comment`、`choerodon_update_comment` 和 `choerodon_delete_comment` 会真实修改猪齿鱼评论，用户明确要求写入且目标与正文可确定时直接提交并回读，无须强制预览或再次确认；删除须核对目标；新增/编辑正文传规范 Markdown，由工具渲染为 HTML。
 
 甄云盘古通用工具 MCP，供任意 MCP 客户端（Claude Desktop / Cursor / 各类 agent）复用。
 
@@ -55,10 +55,10 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `diagnose_context` | `diagnose_context` | 组合诊断：自动汇集 认知 → 模板 → 表 → 关系 的诊断上下文 |
 | 知识库维护写操作 | `save_knowledge` / `update_knowledge` / `delete_knowledge` / `save_sql_template` / `list_sql_templates` / `update_sql_template` / `delete_sql_template` / `record_template_usage` / `add_table_relation` / `record_table_usage` / `upsert_table_knowledge` | 沉淀、维护知识/模板/表目录/关联关系；仅写认知层元数据，不修改业务库 |
 | `obs_*` | `obs_sls_query` / `obs_sls_targets` / `obs_log_query` / `obs_log_trace` / `obs_log_datasources` | 日志能力：阿里云 SLS（国内公有云盘古 prod + 非生产 dev/test 全覆盖）+ Loki（仅 AWS 海外全环境） |
-| `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` | 数据能力（Archery 双站点 cn/aws + 盘古专属租户/库/实例能力）；`archery_query_tenant` 必须传 tenant，不支持空参列举 |
+| `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` / `archery_resolve_workflow_target` / `archery_workflow_sqlcheck` / `archery_submit_workflow` | 双站点只读查询与租户/库/实例发现；按审批组和实例名称解析审批所需数字 ID；用户明确要求时校验并提交纯 DML 审批工单，不执行 SQL |
 | `es_*` | `es_search` / `es_count` / `es_get` | 工作台 ES 的 prod/dev/test 只读查询；禁止写入，单次最多返回 `ES_MAX_SIZE` 条 |
 | 脚本身份发现 | `search_adapter_scripts` / `search_standalone_scripts` | 只按租户、服务、编码或描述发现候选；命中后使用 `zhenyun-script-platform-mcp` 的 `adapter_get` / `independent_script_get` 读取权威当前态 |
-| `choerodon_*` | `choerodon_list_projects` / `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_preview_comment` / `choerodon_add_comment` / `choerodon_update_comment` / `choerodon_delete_comment` | 业务系统能力：猪齿鱼协作；评论预览为离线只读，新增、按版本编辑和删除是写操作，需明确授权并预览完整内容 |
+| `choerodon_*` | `choerodon_list_projects` / `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_preview_comment` / `choerodon_add_comment` / `choerodon_update_comment` / `choerodon_delete_comment` | 业务系统能力：猪齿鱼协作；评论预览为离线只读，新增、按版本编辑和删除是写操作，用户明确要求且目标与内容可确定时直接提交并回读；预览仅在用户要求时使用 |
 | `gitlab_*` | `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 仅对已知 project/ref/path 做精确读取；`gitlab_search_projects/code` 默认不注册，避免失败后回退 |
 | `search_repo` | `search_repo` | 普通代码检索的默认入口：跨本地代码仓库搜索（内容 / 文件名 / 模块结构） |
 
@@ -135,7 +135,8 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 
 **常用参数提示**：
 
-- `obs_sls_query(environment="prod"|"dev"|"test", trace_id=..., keyword=..., level="ERROR"|"", container_name=...)`：`trace_id` 走「ERROR/WARN + 全链路」两阶段查询；`keyword` 传 SLS 查询子句（会与 `_namespace_` 过滤组合）；二开排障传 `container_name="srm-script-container"`，把 traceId 或关键字检索限制在脚本容器。
+- `obs_sls_query(environment="prod"|"dev"|"test", trace_id=..., keyword=..., level="ERROR"|"", container_name=...)`：`trace_id` 使用索引字段检索，兼容旧日志的全文回退，并可与 `keyword`、`level` 组合。只给 `keyword` 且不传 `level` 时默认查 ERROR；SQL 长文本需 `clip_len=0`。二开排障传 `container_name="srm-script-container"`。
+- `query_sql_trace(trace_id=..., from_time=..., to_time=..., container_name="srm-prm", mapper_keyword=...)`：提取完整 `sqlcontent`、参数日志和返回行数，附 SQL 长度与 SHA-256，便于核对是否取全。`mapper_keyword` 可传 Mapper 方法名来限定 SQL 事件。
 - 时间：`time_range` 支持 `最近30分钟` / `最近2小时` / `最近3天` / `今天` / `昨天` / `本周` / `上月`，或 `30m` / `2h` / `1d`，或 `YYYY-MM-DD HH:mm~HH:mm`（北京时间）。
 - `auto_expand`（默认 true）：未显式指定时间窗且 0 命中时，自动扩到最近 24h、72h 各重试一次，实际窗口见 `meta.attempted_windows`。
 - 不确定支持哪些环境时，用 `obs_sls_targets()` 列出真实映射；AWS 侧用 `obs_log_datasources(region="aws")` 列出真实数据源名。

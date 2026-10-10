@@ -79,31 +79,42 @@ def query_sls(project: str, logstore: str, ak_id: str, ak_secret: str, query: st
 
 
 def _key(log: dict) -> tuple:
-    return (log.get("__time__", ""), log.get("_container_name_", ""), str(log.get("content", ""))[:100])
+    # SQL 日志写在 sqlcontent/sqlparameters，而 content 通常为空。仅用 content
+    # 前缀和秒级时间去重会把 Preparing、Parameters、Total 合并为一条。
+    return (
+        log.get("__time__", ""), log.get("__time_ns_part__", ""),
+        log.get("_container_name_", ""), log.get("trace_id", ""),
+        log.get("content", ""), log.get("sqlcontent", ""),
+        log.get("sqlparameters", ""),
+    )
 
 
 def query_trace(project: str, logstore: str, ak_id: str, ak_secret: str, trace_id: str,
                 namespace: str, from_time: int, to_time: int, endpoint: str, line: int = 200,
                 container_name: str = "") -> tuple[list[dict], str]:
     container_clause = f" AND _container_name_: {container_name}" if container_name else ""
-    error_query = (
-        f'"{trace_id}" AND _namespace_: {namespace}{container_clause} '
-        "AND (level: ERROR OR level: WARN)"
-    )
-    full_query = f'"{trace_id}" AND _namespace_: {namespace}{container_clause}'
+    # 字段检索能命中 sqlcontent/sqlparameters 独立字段里的日志；全文检索
+    # trace 字符串可能漏掉这类记录。旧日志若没有 trace_id 字段，再回退全文。
+    full_query = f'trace_id: {trace_id} AND _namespace_: {namespace}{container_clause}'
+    error_query = full_query + " AND (level: ERROR OR level: WARN)"
     errors, p1 = query_sls(project, logstore, ak_id, ak_secret, error_query, from_time, to_time, endpoint, line)
     full, p2 = query_sls(project, logstore, ak_id, ak_secret, full_query, from_time, to_time, endpoint, line)
+    if not errors and not full and p1 == p2 == "Complete":
+        full_query = f'"{trace_id}" AND _namespace_: {namespace}{container_clause}'
+        error_query = full_query + " AND (level: ERROR OR level: WARN)"
+        errors, p1 = query_sls(project, logstore, ak_id, ak_secret, error_query, from_time, to_time, endpoint, line)
+        full, p2 = query_sls(project, logstore, ak_id, ak_secret, full_query, from_time, to_time, endpoint, line)
     merged, seen = [], set()
     for log in errors + full:
         key = _key(log)
         if key not in seen:
             seen.add(key)
             merged.append(log)
-    def time_key(item: dict) -> int:
+    def time_key(item: dict) -> tuple[int, int]:
         try:
-            return int(item.get("__time__", 0))
+            return int(item.get("__time__", 0)), int(item.get("__time_ns_part__", 0))
         except (TypeError, ValueError):
-            return 0
+            return 0, 0
 
     merged.sort(key=time_key)
     return merged, ("Incomplete" if "Incomplete" in (p1, p2) else "Complete")

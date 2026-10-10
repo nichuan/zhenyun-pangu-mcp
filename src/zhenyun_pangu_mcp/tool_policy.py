@@ -11,6 +11,8 @@ READ_ONLY_TOOLS = frozenset({
     'archery_list_instances',
     'archery_query',
     'archery_query_tenant',
+    'archery_resolve_workflow_target',
+    'archery_workflow_sqlcheck',
     'check_marmot_script_static',
     'choerodon_download_attachment',
     'choerodon_get_status_map',
@@ -48,6 +50,7 @@ READ_ONLY_TOOLS = frozenset({
     'obs_sls_query',
     'obs_sls_targets',
     'query_script_trace',
+    'query_sql_trace',
     'search_adapter_script_source',
     'search_adapter_scripts',
     'search_knowledge',
@@ -61,6 +64,7 @@ READ_ONLY_TOOLS = frozenset({
 
 WRITE_TOOLS = frozenset({
     'add_table_relation',
+    'archery_submit_workflow',
     'choerodon_add_comment',
     'choerodon_update_comment',
     'choerodon_delete_comment',

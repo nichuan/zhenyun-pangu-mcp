@@ -2,7 +2,7 @@
 
 工具按前缀分组：
   - obs_*       日志查询（阿里云 SLS：国内公有云盘古 prod/dev/test；Loki：仅 AWS 海外）
-  - archery_*   数据库查询（Archery 双站点 cn/aws + 盘古专属租户/实例/库列表）
+  - archery_*   数据库只读查询及受控 SQL 审批工单提交（Archery 双站点 cn/aws）
   - es_*        正式环境 ES 只读查询（整合自 es-prod；铁律：严禁写、单次 ≤ ES_MAX_SIZE）
   - search_*_scripts 适配器/独立脚本身份发现（当前正文改由 Script Platform MCP 读取）
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -405,7 +406,7 @@ def archery_query(
     db: str | None = None,
     limit: int = 100,
 ) -> str:
-    """执行 Archery 只读 SQL；site 仅接受 cn/aws，省略时默认 cn；支持 SELECT、CASE、IN 和白名单函数，拒绝子查询、窗口、多语句、注释和写入。"""
+    """执行 Archery 单条只读 SQL；支持带前置 Mapper 标记的 SELECT、只读子查询、EXISTS、JOIN 和 UNION；拒绝写入、多语句和不安全函数。"""
     try:
         instance_name = archery.resolve_instance(instance, site, "SAAS-SRM-PROD数据库")
         db_name = db or ARCHERY_DEFAULT_DB
@@ -507,6 +508,56 @@ def archery_list_instances(site: Literal["", "cn", "aws"] = "") -> str:
         "note": "查询实例时须同时传对应 site（如 aws 实例传 site=\"aws\"），"
                 "仅传 instance 而不传 site 会按默认 site=cn 解析而报「未关联该实例」。",
     }, "archery")
+
+
+@_tool()
+def archery_resolve_workflow_target(
+    group_name: str,
+    instance_name: str,
+    site: Literal["cn", "aws"] = "cn",
+) -> str:
+    """按 Archery SQL 上线表单中当前账号可选的审批组和可写实例名称，解析已核实的数字 group_id 与 instance_id；不创建工单、不执行 SQL。"""
+    try:
+        result = archery._client(site).resolve_workflow_target(group_name, instance_name)
+        return _ok(result, "archery")
+    except archery.ArcheryError as e:
+        return _archery_failure(e, "archery_workflow_target")
+
+
+@_tool()
+def archery_workflow_sqlcheck(
+    sql_content: str,
+    instance_id: int,
+    db_name: str,
+    site: Literal["cn", "aws"] = "cn",
+) -> str:
+    """校验数据修复工单的纯 INSERT/UPDATE/DELETE SQL；instance_id 为已核实的 Archery 数字实例 ID。成功后返回一次性提交凭证，不执行 SQL。"""
+    try:
+        if not db_name or not db_name.strip():
+            raise archery.ArcheryParameterError("db_name 必填")
+        result = archery._client(site).workflow_sqlcheck(sql_content, instance_id, db_name.strip())
+        return _ok(result, "archery")
+    except archery.ArcheryError as e:
+        return _archery_failure(e, "archery_sqlcheck")
+
+
+@_tool()
+def archery_submit_workflow(
+    check_token: str,
+    workflow_name: str,
+    group_id: int,
+    site: Literal["cn", "aws"] = "cn",
+    demand_url: str = "",
+    is_backup: bool = True,
+) -> str:
+    """提交已通过 archery_workflow_sqlcheck 的原样 DML 工单；创建审批工单，不执行数据库写入。一次性凭证防止跳过校验和重复提交。"""
+    try:
+        result = archery._client(site).submit_checked_workflow(
+            check_token, workflow_name, group_id, demand_url, is_backup,
+        )
+        return _ok(result, "archery")
+    except archery.ArcheryError as e:
+        return _archery_failure(e, "archery_submit_workflow")
 
 
 _DB_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]*(?:\.[A-Za-z_][A-Za-z0-9_$-]*)?$")
@@ -681,19 +732,19 @@ def choerodon_download_attachment(file_url: str) -> str:
 
 @_tool()
 def choerodon_list_comments(issue_id: str, size: int = 100, project_id: str = "") -> str:
-    """读取猪齿鱼任务评论；只读，写评论使用独立的确认边界，返回 JSON ok 或 error.retryable。"""
+    """读取猪齿鱼任务评论；只读，用于写前核对目标和重复内容，返回 JSON ok 或 error.retryable。"""
     return _choerodon_call("list_comments", issue_id=issue_id, size=size, project_id=project_id or None)
 
 
 @_tool()
 def choerodon_preview_comment(comment: str) -> str:
-    """离线返回完整 Markdown 与将提交的 HTML 评论正文；只读，可用于最终内容确认。"""
+    """离线返回完整 Markdown 与将提交的 HTML 评论正文；只读，仅在用户要求预览时使用。"""
     return _choerodon_call("preview_comment", comment=comment)
 
 
 @_tool()
 def choerodon_add_comment(issue_id: str, comment: str, project_id: str = "") -> str:
-    """向猪齿鱼写入规范 Markdown 评论；真实副作用，必须先确认完整内容。"""
+    """向猪齿鱼写入规范 Markdown 评论；用户明确要求写入且目标和正文可确定时直接调用，写后回读。"""
     return _choerodon_call("create_comment", issue_id=issue_id, comment=comment, project_id=project_id or None)
 
 
@@ -702,7 +753,7 @@ def choerodon_update_comment(
     issue_id: str, comment_id: str, object_version_number: int,
     comment: str, project_id: str = "",
 ) -> str:
-    """按评论 ID 和已读取版本编辑本人评论；写入前须展示完整 Markdown 正文并获明确授权。"""
+    """按评论 ID 和已读取版本编辑本人评论；用户明确要求编辑且目标和正文可确定时直接调用，写后回读。"""
     return _choerodon_call(
         "update_comment", issue_id=issue_id, comment_id=comment_id,
         object_version_number=object_version_number, comment=comment,
@@ -1133,7 +1184,7 @@ def obs_sls_query(
     environment: str = "prod",
     trace_id: str = "",
     keyword: str = "",
-    level: str = "ERROR",
+    level: str | None = None,
     system: str = "盘古",
     from_time: int = 0,
     to_time: int = 0,
@@ -1143,11 +1194,16 @@ def obs_sls_query(
     clip_len: int = 2000,
     container_name: str = "",
 ) -> str:
-    """查询国内盘古阿里云 SLS 日志；由 environment 路由项目/日志库且不暴露 AK，时间窗与返回均有界，返回 JSON ok/error.retryable。"""
+    """查询国内盘古 SLS 日志；trace_id 可与 keyword/level 组合，clip_len=0 保留完整 SQL 字段。"""
     try:
         container = container_name.strip()
         if container and not re.fullmatch(r"[A-Za-z0-9._-]+", container):
             raise ValueError("container_name 只能包含字母、数字、点、下划线和连字符")
+        trace = trace_id.strip()
+        if trace and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", trace):
+            raise ValueError("trace_id 只能包含字母、数字、下划线和连字符")
+        if level is not None and level not in {"", "ERROR", "WARN", "INFO", "DEBUG"}:
+            raise ValueError("level 只能为 ERROR/WARN/INFO/DEBUG 或空字符串")
         target = sls_config.resolve_target(system, environment)
         limit = _bounded_limit(limit, 500)
         start, end = _validate_time_bounds(
@@ -1167,11 +1223,12 @@ def obs_sls_query(
     if auto_expand and not explicit_window:
         windows.extend([(end - hours * 3600, end) for hours in _EXPAND_WINDOWS_HOURS])
 
+    effective_level = level if level is not None else ("" if trace else "ERROR")
     clauses = [f"_namespace_: {target.namespace}"]
     if container:
         clauses.append(f"_container_name_: {container}")
-    if level:
-        clauses.append(f"level: {level}")
+    if effective_level:
+        clauses.append(f"level: {effective_level}")
     if keyword:
         clauses.append(keyword)
     query = " AND ".join(clauses)
@@ -1182,15 +1239,30 @@ def obs_sls_query(
     try:
         for window_start, window_end in windows:
             attempted_windows.append({"from_time": window_start, "to_time": window_end})
-            if trace_id:
-                logs, progress = sls.query_trace(
-                    target.project, target.logstore, ak_id, ak_secret,
-                    trace_id, target.namespace, window_start, window_end,
-                    sls_config.endpoint(), limit, container,
-                )
-                query_used = f'"{trace_id}" AND _namespace_: {target.namespace}'
-                if container:
-                    query_used += f" AND _container_name_: {container}"
+            if trace:
+                trace_query = f"trace_id: {trace} AND " + query
+                if keyword or effective_level:
+                    logs, progress = sls.query_sls(
+                        target.project, target.logstore, ak_id, ak_secret,
+                        trace_query, window_start, window_end,
+                        sls_config.endpoint(), limit,
+                    )
+                    query_used = trace_query
+                    if not logs and progress == "Complete":
+                        fallback_query = f'"{trace}" AND ' + query
+                        logs, progress = sls.query_sls(
+                            target.project, target.logstore, ak_id, ak_secret,
+                            fallback_query, window_start, window_end,
+                            sls_config.endpoint(), limit,
+                        )
+                        query_used = fallback_query
+                else:
+                    logs, progress = sls.query_trace(
+                        target.project, target.logstore, ak_id, ak_secret,
+                        trace, target.namespace, window_start, window_end,
+                        sls_config.endpoint(), limit, container,
+                    )
+                    query_used = trace_query
             else:
                 logs, progress = sls.query_sls(
                     target.project, target.logstore, ak_id, ak_secret,
@@ -1226,6 +1298,80 @@ def obs_sls_query(
         },
         "logs": _clip_logs(logs, clip_len),
     }, "sls")
+
+
+@_tool()
+def query_sql_trace(
+    trace_id: str,
+    from_time: int,
+    to_time: int,
+    environment: str = "prod",
+    system: str = "盘古",
+    container_name: str = "srm-prm",
+    mapper_keyword: str = "",
+    limit: int = 200,
+) -> str:
+    """按 traceId 提取 SLS 中完整的 MyBatis Preparing SQL、参数及返回行数；不裁剪 sqlcontent。"""
+    try:
+        trace = trace_id.strip()
+        container = container_name.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", trace):
+            raise ValueError("trace_id 只能包含字母、数字、下划线和连字符")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", container):
+            raise ValueError("container_name 只能包含字母、数字、点、下划线和连字符")
+        start, end = _validate_time_bounds(int(from_time), int(to_time))
+        limit = _bounded_limit(limit, 500)
+        target = sls_config.resolve_target(system, environment)
+        ak_id, ak_secret = sls_config.credentials(target)
+        logs, progress = sls.query_trace(
+            target.project, target.logstore, ak_id, ak_secret,
+            trace, target.namespace, start, end, sls_config.endpoint(), limit, container,
+        )
+        method = mapper_keyword.rsplit(".", 1)[-1].strip()
+        events = []
+        for log in logs:
+            value = str(log.get("sqlcontent") or log.get("sqlparameters") or "")
+            if not value or (method and method not in value):
+                continue
+            event: dict = {
+                "time": log.get("time") or log.get("_time_"),
+                "trace_id": log.get("trace_id"),
+                "container": log.get("_container_name_"),
+                "field": "sqlcontent" if log.get("sqlcontent") else "sqlparameters",
+            }
+            if "Preparing:" in value:
+                sql = value.split("Preparing:", 1)[1].strip()
+                mapper = re.search(r"/\*([^*]+)\*/", sql)
+                event.update(
+                    kind="prepared_sql", sql=sql, sql_length=len(sql),
+                    sql_sha256=hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+                    mapper=mapper.group(1) if mapper else None,
+                    has_bind_placeholders="?" in sql,
+                )
+            elif log.get("sqlparameters"):
+                event.update(kind="parameters", message=value)
+            else:
+                total = re.search(r"<==\s+Total:\s*(\d+)", value)
+                event.update(kind="returned_rows" if total else "sql_log", message=value)
+                if total:
+                    event["returned_rows"] = int(total.group(1))
+            events.append(event)
+        possibly_truncated = len(logs) >= limit
+        return _ok({
+            "meta": {
+                "trace_id": trace, "system": target.system,
+                "environment": target.environment, "container_name": container,
+                "from_time_bj": datetime.fromtimestamp(start, BJ).strftime("%Y-%m-%d %H:%M:%S"),
+                "to_time_bj": datetime.fromtimestamp(end, BJ).strftime("%Y-%m-%d %H:%M:%S"),
+                "query": f"trace_id: {trace} AND _namespace_: {target.namespace} AND _container_name_: {container}",
+                "log_count": len(logs), "sql_event_count": len(events),
+                "complete": progress == "Complete" and not possibly_truncated,
+                "possibly_truncated": possibly_truncated,
+            },
+            "sql_events": events,
+        }, "sls")
+    except (ValueError, RuntimeError) as e:
+        return _err("sql_trace", str(e), retryable=isinstance(e, RuntimeError))
 
 
 _SCRIPT_TRACE_STAGE_PATTERNS: dict[str, tuple[str, ...]] = {

@@ -235,7 +235,7 @@ def test_obs_sls_query_scopes_script_trace_to_container(monkeypatch):
     assert result["ok"] is True
     assert calls[0][-1] == "srm-script-container"
     assert result["meta"]["query"] == (
-        '"trace-1" AND _namespace_: saas-prod AND _container_name_: srm-script-container'
+        'trace_id: trace-1 AND _namespace_: saas-prod AND _container_name_: srm-script-container'
     )
 
 
@@ -252,8 +252,73 @@ def test_sls_trace_applies_container_to_error_and_full_queries(monkeypatch):
         1, 2, "endpoint", 10, "srm-script-container",
     )
 
-    assert len(queries) == 2
+    assert len(queries) == 4
+    assert all(query.startswith("trace_id: trace-1") for query in queries[:2])
+    assert all(query.startswith('"trace-1"') for query in queries[2:])
     assert all("_container_name_: srm-script-container" in query for query in queries)
+
+
+def test_sls_trace_keeps_sql_fields_with_same_second(monkeypatch):
+    sql_logs = [
+        {"__time__": "100", "__time_ns_part__": "170000000", "trace_id": "abc",
+         "_container_name_": "srm-prm", "sqlcontent": "==> Preparing: SELECT 1"},
+        {"__time__": "100", "__time_ns_part__": "171000000", "trace_id": "abc",
+         "_container_name_": "srm-prm", "sqlparameters": "==> Parameters: 1"},
+        {"__time__": "100", "__time_ns_part__": "500000000", "trace_id": "abc",
+         "_container_name_": "srm-prm", "sqlcontent": "<== Total: 0"},
+    ]
+    monkeypatch.setattr(
+        sls, "query_sls",
+        lambda *_args: (sql_logs if "level:" not in _args[4] else [], "Complete"),
+    )
+    logs, progress = sls.query_trace(
+        "project", "logstore", "ak-id", "ak-secret", "abc", "saas-prod",
+        99, 101, "endpoint", 100, "srm-prm",
+    )
+    assert progress == "Complete"
+    assert len(logs) == 3
+    assert [log["__time_ns_part__"] for log in logs] == [
+        "170000000", "171000000", "500000000",
+    ]
+
+
+def test_obs_sls_query_combines_trace_keyword_and_level(monkeypatch):
+    queries = []
+    monkeypatch.setattr(sls_config, "credentials", lambda target: ("ak-id", "ak-secret"))
+    def fake_query_sls(*args):
+        queries.append(args[4])
+        return [{"trace_id": "abc", "sqlcontent": "Preparing: SELECT 1"}], "Complete"
+    monkeypatch.setattr(sls, "query_sls", fake_query_sls)
+    result = json.loads(server.obs_sls_query(
+        environment="prod", trace_id="abc", keyword="sourceNewLinkQuotePrQueryList",
+        level="DEBUG", container_name="srm-prm", from_time=99, to_time=101,
+    ))
+    assert result["ok"] is True
+    assert queries == [
+        "trace_id: abc AND _namespace_: saas-prod AND _container_name_: srm-prm "
+        "AND level: DEBUG AND sourceNewLinkQuotePrQueryList"
+    ]
+
+
+def test_query_sql_trace_preserves_full_sql_and_row_count(monkeypatch):
+    sql = "/*org.example.Mapper.query*/ SELECT " + ", ".join(["1"] * 1500)
+    logs = [
+        {"time": "2026-09-30 15:46:59.261", "trace_id": "abc",
+         "_container_name_": "srm-prm", "sqlcontent": "[abc] Mapper.query ==> Preparing: " + sql},
+        {"time": "2026-09-30 15:46:59.500", "trace_id": "abc",
+         "_container_name_": "srm-prm", "sqlcontent": "[abc] Mapper.query <== Total: 0"},
+    ]
+    monkeypatch.setattr(sls_config, "credentials", lambda target: ("ak-id", "ak-secret"))
+    monkeypatch.setattr(sls, "query_trace", lambda *_args: (logs, "Complete"))
+    result = json.loads(server.query_sql_trace(
+        trace_id="abc", from_time=99, to_time=101, mapper_keyword="Mapper.query",
+    ))
+    assert result["ok"] is True
+    events = result["sql_events"]
+    assert events[0]["sql"] == sql
+    assert events[0]["sql_length"] == len(sql)
+    assert events[1]["returned_rows"] == 0
+    assert result["meta"]["complete"] is True
 
 
 def test_obs_sls_query_rejects_unsafe_container_name():

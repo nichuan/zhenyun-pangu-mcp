@@ -927,7 +927,7 @@ def update_issue_comment(issue_id: str, comment_id: str, object_version_number: 
     except (TypeError, ValueError) as e:
         raise ChoerodonError("评论版本缺失或无效；请重新读取评论") from e
     if expected_version != actual_version:
-        raise ChoerodonError("评论版本已变化；请重新读取并预览完整正文")
+        raise ChoerodonError("评论版本已变化；请重新读取并核对目标及正文")
     body = {
         "commentId": comment_id,
         "objectVersionNumber": expected_version,

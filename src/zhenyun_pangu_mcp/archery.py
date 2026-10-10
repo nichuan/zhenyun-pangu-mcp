@@ -3,16 +3,22 @@
 使用 csrftoken + sessionid 认证模型（双站点 cn/aws），
 覆盖盘古专属能力：租户查询、实例列表、环境映射。
 
-只读安全：用户可执行的 SQL 仅允许单条 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE，
-支持 CASE 表达式和 IN 值列表；写操作及不安全的高级语法拦截。
+查询安全：archery_query 仅允许单条 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE。
+SQL 工单接口只做校验与提交，不执行工单中的写 SQL。
 """
 from __future__ import annotations
 
 import os
 import re
+import hashlib
+import secrets
 import threading
+import time
+from html.parser import HTMLParser
 
 import requests
+import sqlparse
+from sqlparse import tokens as sql_tokens
 from requests.exceptions import RequestException
 from urllib.parse import urljoin, urlparse
 
@@ -46,45 +52,119 @@ class ArcheryParameterError(ArcheryError):
         super().__init__(message, code="bad_param", retryable=False)
 
 
+class _WorkflowGroupOptionParser(HTMLParser):
+    """读取 SQL 上线表单中当前用户可选的资源组名称和 ID。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.groups: list[tuple[str, int]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "option":
+            return
+        attributes = dict(attrs)
+        name = attributes.get("value")
+        group_id = attributes.get("group-id") or attributes.get("data-group-id")
+        if not name or not group_id:
+            return
+        try:
+            parsed_id = int(group_id)
+        except (TypeError, ValueError):
+            return
+        if parsed_id > 0:
+            self.groups.append((name, parsed_id))
+
+
 # 同一 MCP 进程内按站点复用登录态，避免每次工具调用都重新登录。
 # Session 还包含 cookie jar，因此必须和站点绑定，不能在 cn/aws 之间混用。
 _CLIENTS: dict[str, "ArcheryClient"] = {}
 _CLIENTS_LOCK = threading.Lock()
 
+_WORKFLOW_CHECKS: dict[str, dict] = {}
+_WORKFLOW_CHECKS_LOCK = threading.Lock()
+_WORKFLOW_CHECK_TTL = 600
 
-# Archery 用户查询只支持最基本的单条只读语句：SELECT、EXPLAIN SELECT、
-# SHOW CREATE TABLE。
+
+def validate_workflow_dml(sql: str) -> str:
+    """仅接受纯 INSERT/UPDATE/DELETE 语句包，保留顺序并规范末尾分号。"""
+    if not isinstance(sql, str) or not sql.strip():
+        raise ArcheryParameterError("工单 SQL 不能为空")
+    statements = sqlparse.parse(sql)
+    if not statements:
+        raise ArcheryParameterError("工单 SQL 不能为空")
+    result = []
+    for statement in statements:
+        if any(token.ttype in sql_tokens.Comment for token in statement.flatten()):
+            raise ArcheryParameterError("工单 SQL 只接受写语句，不含注释或预查/核验 SELECT")
+        content = str(statement).strip().rstrip(";").strip()
+        if not content or not re.match(r"^(INSERT|UPDATE|DELETE)\b", content, re.IGNORECASE):
+            raise ArcheryParameterError("工单 SQL 仅允许 INSERT、UPDATE、DELETE 语句")
+        if statement.get_type() not in {"INSERT", "UPDATE", "DELETE"}:
+            raise ArcheryParameterError("工单 SQL 包含无法识别的写语句")
+        result.append(content + ";")
+    return "\n".join(result)
+
+
+def _remember_workflow_check(site: str, instance_id: int, db_name: str, sql: str) -> tuple[str, str]:
+    token = secrets.token_urlsafe(24)
+    digest = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    with _WORKFLOW_CHECKS_LOCK:
+        now = time.monotonic()
+        for key, value in list(_WORKFLOW_CHECKS.items()):
+            if value["expires_at"] <= now:
+                del _WORKFLOW_CHECKS[key]
+        _WORKFLOW_CHECKS[token] = {
+            "site": site, "instance_id": instance_id, "db_name": db_name,
+            "sql": sql, "sha256": digest, "expires_at": now + _WORKFLOW_CHECK_TTL,
+        }
+    return token, digest
+
+
+def _consume_workflow_check(token: str) -> dict:
+    with _WORKFLOW_CHECKS_LOCK:
+        record = _WORKFLOW_CHECKS.pop(token, None)
+    if not record or record["expires_at"] <= time.monotonic():
+        raise ArcheryParameterError("校验凭证不存在、已使用或已过期；请重新校验 SQL")
+    return record
+
+
+# Archery 用户查询只支持单条只读语句：SELECT、EXPLAIN SELECT、
+# SHOW CREATE TABLE。SELECT 可包含只读子查询、EXISTS、派生表和 UNION。
 #
 # 这里不使用字符串前缀白名单之外的“放行”策略：仅检查 startswith 会让
 # `SELECT ...; DELETE ...`、`WITH ... DELETE ...` 等语句绕过只读边界。
 _UNSUPPORTED_SQL_TOKENS = (
     "insert", "update", "delete", "replace", "merge", "upsert", "drop", "alter",
     "create", "truncate", "grant", "revoke", "call", "execute", "set", "use",
-    "show", "describe", "explain", "with", "union", "intersect", "except",
+    "show", "describe", "explain", "with", "intersect", "except",
     "over", "partition", "window", "procedure", "function", "trigger", "into", "outfile",
     "dumpfile", "for", "lock",
 )
 
-# Parentheses are allowed for deterministic, read-only scalar functions and IN
-# value lists. Every other parenthesized construct remains rejected, including
-# subqueries and arbitrary grouping.
+# 识别函数调用时保留白名单；下面这些词后面的括号是 SQL 结构，
+# 例如 EXISTS (SELECT ...)、FROM (SELECT ...) 和 AND (... OR ...)。
 _SAFE_SQL_FUNCTIONS = frozenset({
     "count", "sum", "avg", "min", "max", "ifnull", "nullif",
     "concat", "concat_ws", "cast",
 })
+_SQL_PAREN_KEYWORDS = frozenset({
+    "select", "from", "where", "and", "or", "not", "in", "exists",
+    "on", "join", "having", "when", "then", "else", "case", "as",
+    "union", "all", "by", "limit", "is", "between",
+})
 
 
 def _sql_code(sql: str) -> str:
-    """返回 SQL 的非字符串部分，同时拒绝注释和多语句。
+    """返回 SQL 的非字符串部分，允许安全的前置 Mapper 标记注释。
 
     仅用于安全边界校验，不是完整 SQL parser；字符串中的关键字/分号不会被
-    误判，字符串外的注释、语句分隔符和未授权的括号结构会被拒绝。
+    误判；可执行注释、多语句和非白名单函数会被拒绝。
     """
     if not isinstance(sql, str) or not sql.strip():
         raise ArcheryParameterError("SQL 不能为空")
 
     code: list[str] = []
-    allowed_parens: list[str] = []
+    parens: list[str] = []
     i = 0
     n = len(sql)
     while i < n:
@@ -111,9 +191,18 @@ def _sql_code(sql: str) -> str:
             # 字符串内容仍完全抹去，避免其中的关键字参与语法判断。
             code.append("__quoted_identifier__" if quote == "`" else " ")
             continue
-        # 注释会隐藏后续语句或改变 WHERE 语义，用户 SQL 一律不允许。
-        if sql.startswith("--", i) or ch == "#" or sql.startswith("/*", i):
-            raise ArcheryParameterError("不允许使用 SQL 注释")
+        # 生产 MyBatis 日志会在 SQL 开头附带 /*Mapper.id*/。仅允许
+        # 不含空白和操作符的前置标记；MySQL /*!...*/ 可执行注释始终拒绝。
+        if sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            marker = sql[i + 2:end] if end >= 0 else ""
+            if "".join(code).strip() or not re.fullmatch(r"[A-Za-z0-9_.$:-]+", marker):
+                raise ArcheryParameterError("仅允许 SQL 开头的普通 Mapper 标记注释")
+            code.append(" ")
+            i = end + 2
+            continue
+        if sql.startswith("--", i) or ch == "#":
+            raise ArcheryParameterError("不允许使用 SQL 行注释")
         if ch == ";":
             # 允许一个末尾语句 terminator，除此之外均视为多语句。
             if sql[i + 1 :].strip():
@@ -122,45 +211,36 @@ def _sql_code(sql: str) -> str:
             i += 1
             continue
         if ch == "(":
-            # A function name must be immediately adjacent to the opening
-            # parenthesis; whitespace before '(' is intentionally rejected.
-            match = re.search(r"([A-Za-z_][A-Za-z0-9_$]*)$", "".join(code))
-            function_name = match.group(1).lower() if match else ""
-            if function_name in _SAFE_SQL_FUNCTIONS:
-                allowed_parens.append("function")
-            elif re.search(r"\bin\s*$", "".join(code), flags=re.IGNORECASE):
-                # IN lists such as `id IN (1, 2)` or `code NOT IN ('A', 'B')`
-                # are read-only scalar predicates. Subqueries and nested
-                # parentheses remain blocked by the checks below.
-                allowed_parens.append("in-list")
-            else:
+            match = re.search(r"([A-Za-z_][A-Za-z0-9_$]*)\s*$", "".join(code))
+            word = match.group(1).lower() if match else ""
+            if word and word not in _SQL_PAREN_KEYWORDS and word not in _SAFE_SQL_FUNCTIONS:
                 raise ArcheryParameterError(
-                    "仅允许白名单无副作用函数、IN 值列表，不支持子查询或其它括号结构"
+                    f"不支持的 SQL 函数或括号结构：{word}"
                 )
+            parens.append("function" if word in _SAFE_SQL_FUNCTIONS else "expression")
             code.append(ch)
             i += 1
             continue
         if ch == ")":
-            if not allowed_parens:
-                raise ArcheryParameterError("括号结构不受支持；仅允许白名单函数和 IN 值列表")
-            allowed_parens.pop()
+            if not parens:
+                raise ArcheryParameterError("SQL 括号不匹配")
+            parens.pop()
             code.append(ch)
             i += 1
             continue
         code.append(ch)
         i += 1
-    if allowed_parens:
+    if parens:
         raise ArcheryParameterError("SQL 包含未闭合的括号")
     return "".join(code)
 
 
 def validate_select_sql(sql: str) -> None:
-    """校验用户 SQL 必须是单条基础只读语句。
+    """校验用户 SQL 必须是单条只读语句。
 
     允许 SELECT、EXPLAIN SELECT、SHOW CREATE TABLE；SELECT 支持常见的
-    列/表/WHERE/ORDER BY/GROUP BY/LIMIT、CASE 表达式和 IN 值列表。不允许 CTE、
-    集合运算、窗口函数；括号仅允许白名单无副作用函数和 IN 值列表，子查询、DDL/DML、
-    注释和多语句均拒绝。
+    JOIN、CASE、EXISTS、派生表、IN 子查询和 UNION。仍拒绝写入、CTE、
+    窗口函数、可执行注释、多语句和非白名单函数。
 
     函数名保留为历史名称，调用方无需修改。
     """
@@ -187,12 +267,6 @@ def validate_select_sql(sql: str) -> None:
 
     # EXPLAIN 只允许解释 SELECT，不能借此包装 UPDATE/DELETE 等写操作。
     statement = normalized[len("explain ") :] if is_explain_select else normalized
-    # A SELECT token after the outer statement start would be a subquery or
-    # malformed function argument; neither is part of the safe grammar.
-    if re.search(r"\bselect\b", statement[len("select") :]):
-        raise ArcheryParameterError(
-            "不支持子查询；仅允许外层基础 SELECT 与白名单无副作用函数"
-        )
     for token in _UNSUPPORTED_SQL_TOKENS:
         if re.search(rf"\b{token}\b", statement):
             raise ArcheryParameterError(
@@ -276,6 +350,7 @@ class ArcheryClient:
         url: str,
         *,
         data: dict | None = None,
+        json_body: dict | None = None,
         params: dict | None = None,
         headers: dict | None = None,
         csrf: bool = False,
@@ -292,6 +367,7 @@ class ArcheryClient:
                         method,
                         url,
                         data=data,
+                        json=json_body,
                         params=params,
                         headers=request_headers,
                         timeout=self.timeout,
@@ -327,6 +403,197 @@ class ArcheryClient:
         if payload.get("status") not in (0, None):
             raise ArcheryError(payload.get("msg") or "请求失败（status 非 0）")
         return payload
+
+    def resolve_workflow_target(self, group_name: str, instance_name: str) -> dict:
+        """按当前账号可提交的资源组与实例名称解析 Archery 数字 ID。"""
+        group_name = (group_name or "").strip()
+        instance_name = (instance_name or "").strip()
+        if not group_name or not instance_name:
+            raise ArcheryParameterError("group_name 和 instance_name 均必填")
+
+        submit_url = urljoin(self.base_url + "/", "submitsql/")
+        page = self._request_with_reauth(
+            "GET", submit_url,
+            headers={"Referer": submit_url},
+        )
+        if page.status_code != 200:
+            raise ArcheryError(
+                f"读取 Archery SQL 上线选项失败（HTTP {page.status_code}）",
+                code="archery_workflow_target", retryable=False,
+            )
+        parser = _WorkflowGroupOptionParser()
+        parser.feed(page.text or "")
+        group_ids = {gid for name, gid in parser.groups if name == group_name}
+        if not group_ids:
+            raise ArcheryParameterError(
+                f"当前 Archery 账号的 SQL 上线表单中找不到审批组：{group_name}"
+            )
+        if len(group_ids) != 1:
+            raise ArcheryParameterError(f"审批组名称对应多个 group_id：{group_name}")
+        group_id = group_ids.pop()
+
+        instances_url = urljoin(self.base_url + "/", "group/instances/")
+        response = self._request_with_reauth(
+            "POST", instances_url,
+            data={"group_name": group_name, "tag_code": "can_write"},
+            headers={
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": submit_url,
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            },
+            csrf=True,
+        )
+        payload = self._parse(response)
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            raise ArcheryError(
+                "Archery 未返回该审批组可提交的实例列表",
+                code="archery_workflow_target", retryable=False,
+            )
+        matches = [
+            row for row in rows
+            if isinstance(row, dict) and row.get("instance_name") == instance_name
+        ]
+        if not matches:
+            raise ArcheryParameterError(
+                f"审批组“{group_name}”下找不到可提交实例：{instance_name}"
+            )
+        instance_ids = {int(row["id"]) for row in matches if str(row.get("id", "")).isdigit()}
+        if len(instance_ids) != 1:
+            raise ArcheryParameterError(
+                f"实例名称未唯一解析到数字 instance_id：{instance_name}"
+            )
+        return {
+            "site": self.site,
+            "group_name": group_name,
+            "group_id": group_id,
+            "instance_name": instance_name,
+            "instance_id": instance_ids.pop(),
+            "db_type": str(matches[0].get("db_type") or ""),
+        }
+
+    def _workflow_response(self, response, operation: str, expected_status: int) -> dict:
+        if response.status_code in (301, 302, 401, 403):
+            self._invalidate_auth()
+            raise ArcheryError("Archery 认证失效或无工单提交权限", code=operation, retryable=False)
+        try:
+            payload = response.json()
+        except ValueError as e:
+            raise ArcheryError(
+                f"{operation} 返回非 JSON（HTTP {response.status_code}）",
+                code=operation, retryable=False,
+            ) from e
+        if operation == "archery_submit_workflow" and response.status_code >= 500:
+            raise ArcheryError(
+                "工单提交返回服务端错误，结果可能已写入；请先在 Archery 按名称核对，勿直接重试",
+                code="archery_submit_unknown", retryable=False,
+            )
+        if response.status_code != expected_status or not isinstance(payload, dict):
+            detail = payload.get("errors") or payload.get("detail") or payload.get("msg") if isinstance(payload, dict) else None
+            raise ArcheryError(
+                f"{operation} 失败（HTTP {response.status_code}）: {str(detail or payload)[:500]}",
+                code=operation, retryable=False,
+            )
+        return payload
+
+    def workflow_sqlcheck(self, sql: str, instance_id: int, db_name: str) -> dict:
+        dml = validate_workflow_dml(sql)
+        if not isinstance(instance_id, int) or isinstance(instance_id, bool) or instance_id <= 0:
+            raise ArcheryParameterError("instance_id 必须为已核实的正整数")
+        url = urljoin(self.base_url + "/", "api/v1/workflow/sqlcheck/")
+        response = self._request_with_reauth(
+            "POST", url,
+            json_body={"full_sql": dml, "instance_id": instance_id, "db_name": db_name},
+            headers={
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": urljoin(self.base_url + "/", "submitsql/"),
+                "Content-Type": "application/json",
+            },
+            csrf=True,
+        )
+        payload = self._workflow_response(response, "archery_sqlcheck", 200)
+        rows = payload.get("rows")
+        try:
+            error_count = int(payload["error_count"])
+            warning_count = int(payload["warning_count"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise ArcheryError("SQL 校验结果缺少错误/警告计数", code="archery_sqlcheck", retryable=False) from e
+        row_errors = isinstance(rows, list) and any(
+            not isinstance(row, dict) or str(row.get("errlevel", "")) not in {"0", "1"}
+            for row in rows
+        )
+        checked = payload.get("checked") in (True, 1, "True", "true", "1")
+        passed = (
+            checked and isinstance(rows, list) and len(rows) >= len(sqlparse.parse(dml))
+            and error_count == 0 and not payload.get("error")
+            and not payload.get("is_critical") and not row_errors
+        )
+        result = {
+            "site": self.site, "instance_id": instance_id,
+            "db_name": db_name, "passed": passed, "error_count": error_count,
+            "warning_count": warning_count, "check_result": payload,
+        }
+        if passed:
+            token, digest = _remember_workflow_check(self.site, instance_id, db_name, dml)
+            result.update(check_token=token, sql_sha256=digest, statement_count=len(sqlparse.parse(dml)))
+        return result
+
+    def submit_checked_workflow(
+        self, check_token: str, workflow_name: str, group_id: int,
+        demand_url: str = "", is_backup: bool = True,
+    ) -> dict:
+        if not workflow_name.strip() or len(workflow_name) > 50:
+            raise ArcheryParameterError("工单名称不能为空且不能超过 50 字符")
+        if not isinstance(group_id, int) or isinstance(group_id, bool) or group_id <= 0:
+            raise ArcheryParameterError("group_id 必须为正整数")
+        if len(demand_url) > 500:
+            raise ArcheryParameterError("需求链接不能超过 500 字符")
+        record = _consume_workflow_check(check_token)
+        if record["site"] != self.site:
+            raise ArcheryParameterError("校验凭证所属站点与提交站点不一致")
+        url = urljoin(self.base_url + "/", "api/v1/workflow/")
+        body = {
+            "workflow": {
+                "workflow_name": workflow_name, "demand_url": demand_url,
+                "group_id": group_id, "instance": record["instance_id"],
+                "db_name": record["db_name"], "is_backup": is_backup,
+                "run_date_start": "", "run_date_end": "",
+            },
+            "sql_content": record["sql"],
+        }
+        with self._request_lock:
+            self.authenticate()
+            headers = {
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRFToken": self._ensure_csrf() or "",
+                "Referer": urljoin(self.base_url + "/", "submitsql/"),
+                "Content-Type": "application/json",
+            }
+            try:
+                response = self.session.request(
+                    "POST", url, json=body, headers=headers,
+                    timeout=self.timeout, allow_redirects=False,
+                )
+            except RequestException as e:
+                raise ArcheryError(
+                    "工单提交结果未知；请先在 Archery 按名称核对，勿直接重试",
+                    code="archery_submit_unknown", retryable=False,
+                ) from e
+        payload = self._workflow_response(response, "archery_submit_workflow", 201)
+        workflow = payload.get("workflow")
+        workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
+        if not workflow_id:
+            raise ArcheryError(
+                "提交返回 201 但缺少工单 ID；请在 Archery 核对是否已创建，勿直接重试",
+                code="archery_submit_unknown", retryable=False,
+            )
+        return {
+            "submitted": True, "site": self.site,
+            "workflow_id": workflow_id, "workflow_name": workflow_name,
+            "instance_id": record["instance_id"], "db_name": record["db_name"],
+            "group_id": group_id, "sql_sha256": record["sha256"],
+            "workflow": workflow,
+        }
 
     # ---------- SQL 查询 ----------
     def query(
