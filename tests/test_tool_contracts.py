@@ -61,7 +61,7 @@ def test_archery_sql_parameter_errors_are_not_retryable():
     assert result["ok"] is False
     assert result["error"]["code"] == "bad_param"
     assert result["error"]["retryable"] is False
-    assert "白名单" in result["error"]["message"]
+    assert result["error"]["message"] == "不支持的 SQL 函数或括号结构：sleep"
 
 
 def test_conditional_required_fields_are_advertised_in_tool_schemas():

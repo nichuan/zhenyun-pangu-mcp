@@ -49,9 +49,10 @@ rsync -a --delete --exclude='.DS_Store' --exclude='.git' --exclude='.env' \
   --exclude='*.pyc' --exclude='dist' --exclude='build' --exclude='.mcp.json' \
   "${MCP_ROOT}/" "${PLUGIN_ROOT}/servers/zhenyun-pangu-mcp/"
 rsync -a --delete --exclude='.DS_Store' --exclude='.git' --exclude='.env' \
-  --exclude='.venv' --exclude='.auth' --exclude='.pytest_cache' --exclude='.ruff_cache' \
+  --exclude='.venv' --exclude='.auth' --exclude='.tmp' --exclude='.pytest_cache' --exclude='.ruff_cache' \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='dist' --exclude='build' \
   "${SCRIPT_PLATFORM_ROOT}/" "${PLUGIN_ROOT}/servers/zhenyun-script-platform-mcp/"
+rm -rf "${PLUGIN_ROOT}/servers/zhenyun-script-platform-mcp/.tmp"
 cp "${MCP_ROOT}/scripts/plugin.mcp.json" "${PLUGIN_ROOT}/.mcp.json"
 cp "${MCP_ROOT}/scripts/plugin.manifest.json" "${PLUGIN_ROOT}/.codex-plugin/plugin.json"
 
@@ -87,16 +88,16 @@ mcp_drift="$(
 )"
 script_mcp_drift="$(
   rsync -ani --delete --exclude='.DS_Store' --exclude='.git' --exclude='.env' \
-    --exclude='.venv' --exclude='.auth' --exclude='.pytest_cache' --exclude='.ruff_cache' \
+    --exclude='.venv' --exclude='.auth' --exclude='.tmp' --exclude='.pytest_cache' --exclude='.ruff_cache' \
     --exclude='__pycache__' --exclude='*.pyc' --exclude='dist' --exclude='build' \
-    "${SCRIPT_PLATFORM_ROOT}/" "${PLUGIN_ROOT}/servers/zhenyun-script-platform-mcp/"
+    "${SCRIPT_PLATFORM_ROOT}/" "${PLUGIN_ROOT}/servers/zhenyun-script-platform-mcp/" | awk '$1 !~ /^\.d/'
 )"
 plugin_mcp_drift="$(
   cmp -s "${MCP_ROOT}/scripts/plugin.mcp.json" "${PLUGIN_ROOT}/.mcp.json" || echo '.mcp.json differs'
 )"
 cache_drift="$(
   rsync -acni --delete --exclude='.DS_Store' --exclude='.git' --exclude='.env' \
-    --exclude='.venv' --exclude='.auth' --exclude='.pytest_cache' --exclude='__pycache__' \
+    --exclude='.venv' --exclude='.auth' --exclude='.tmp' --exclude='.pytest_cache' --exclude='__pycache__' \
     --exclude='*.pyc' --exclude='dist' --exclude='build' \
     --exclude='/servers/zhenyun-pangu-mcp/.mcp.json' \
     "${PLUGIN_ROOT}/" "${INSTALLED_PLUGIN_ROOT}/" | awk '$1 !~ /^\.d/'
