@@ -5,6 +5,8 @@ import os
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from zhenyun_pangu_mcp import delivery_quality, server  # noqa: E402
@@ -49,6 +51,73 @@ function process(input) {
 
     assert result["status"] == "pass"
     assert result["applied_rules"] == {}
+
+
+@pytest.mark.parametrize("module", ["@M/v1/object", "@M/v1/json-bigint", "@M/2021/std", "@M/2021/biz", "@M/2021/other"])
+def test_static_check_allows_only_verified_literal_platform_requires(module):
+    source = f"const helper = require( '{module}' );\nfunction process(input) {{ return input; }}"
+    rules = {"allowed_runtime_modules": [module], "required_log_stages": []}
+
+    result = delivery_quality.static_check_script(source, rules_json=json.dumps(rules))
+
+    assert result["status"] == "pass"
+    assert result["applied_rules"]["allowed_runtime_modules"] == [module]
+
+
+def test_static_check_keeps_requires_strict_by_default():
+    source = 'const helper = require("@M/v1/object");\nfunction process(input) { return input; }'
+
+    result = delivery_quality.static_check_script(source)
+
+    assert "node_global" in {finding["code"] for finding in result["findings"]}
+
+
+@pytest.mark.parametrize("call", [
+    'require("@M/v1/cache")',
+    'require("@M/2021/std")',
+    'require(moduleName)',
+    'require("@M/v1/" + "object")',
+    'require(`@M/v1/object`)',
+    'require("fs")',
+    'require("node:fs")',
+    'require("../object")',
+    'require("@M/v1/object/../cache")',
+    'loader.require("@M/v1/object")',
+])
+def test_static_check_rejects_unverified_dynamic_and_node_requires(call):
+    source = f"const helper = {call};\nfunction process(input) {{ return input; }}"
+    rules = {"allowed_runtime_modules": ["@M/v1/object"], "required_log_stages": []}
+
+    result = delivery_quality.static_check_script(source, rules_json=json.dumps(rules))
+
+    assert result["status"] == "fail"
+    assert any(finding["code"] == "node_global" for finding in result["findings"])
+
+
+def test_static_check_does_not_hide_a_forbidden_require_after_an_allowed_call():
+    source = '''const helper = require("@M/v1/object");
+const fs = require("node:fs");
+function process(input) { return input; }'''
+    rules = {"allowed_runtime_modules": ["@M/v1/object"], "required_log_stages": []}
+
+    result = delivery_quality.static_check_script(source, rules_json=json.dumps(rules))
+
+    finding = next(item for item in result["findings"] if item["code"] == "node_global")
+    assert finding["line"] == 2
+    assert 'require("node:fs")' in finding["evidence"]
+
+
+@pytest.mark.parametrize("value", [
+    None, "@M/v1/object", [1], [""], ["fs"], ["node:fs"], ["../object"],
+    ["@M/bridge"], ["@M/2021/object"], ["@M/v1/../object"],
+    ["@M/v1/object/../../fs"], ["@M/v1/object/index.js"], [" @M/v1/object"],
+])
+def test_static_check_rejects_unsafe_or_malformed_runtime_module_allowlist(value):
+    with pytest.raises(ValueError, match="allowed_runtime_modules"):
+        delivery_quality.static_check_script(
+            "function process(input) { return input; }",
+            rules_json=json.dumps({"allowed_runtime_modules": value}),
+        )
 
 
 def test_script_trace_requires_explicit_time_window_before_backend_access():

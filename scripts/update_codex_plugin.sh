@@ -7,14 +7,14 @@ MCP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${MCP_ROOT}/.." && pwd)"
 SCRIPT_PLATFORM_ROOT="${WORKSPACE_ROOT}/zhenyun-script-platform-mcp"
 PLUGIN_ROOT="${PLUGIN_ROOT:-/Users/chuanni/plugins/zhenyun-pangu-toolkit}"
-PLUGIN_CREATOR_ROOT="/Users/chuanni/.codex/skills/.system/plugin-creator"
+PLUGIN_PACKAGE_HELPER="${MCP_ROOT}/scripts/plugin_package.py"
 SKILL_CREATOR_ROOT="/Users/chuanni/.codex/skills/.system/skill-creator"
 UV_CACHE_DIR_VALUE="${UV_CACHE_DIR:-/private/tmp/zhenyun-uv-cache}"
 SCRIPT_UV_CACHE_DIR_VALUE="${SCRIPT_UV_CACHE_DIR:-/private/tmp/zhenyun-script-platform-uv-cache}"
 
 MARKETPLACE_NAME="$(
   UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}" \
-    uv run --no-project python "${PLUGIN_CREATOR_ROOT}/scripts/read_marketplace_name.py"
+    uv run --no-project python "${PLUGIN_PACKAGE_HELPER}" marketplace-name "${PLUGIN_ROOT}"
 )"
 
 for skill_dir in "${WORKSPACE_ROOT}"/custom-skills/*; do
@@ -59,11 +59,10 @@ cp "${MCP_ROOT}/scripts/plugin.manifest.json" "${PLUGIN_ROOT}/.codex-plugin/plug
 (
   cd "${MCP_ROOT}"
   UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}" uv run python \
-    "${PLUGIN_CREATOR_ROOT}/scripts/validate_plugin.py" "${PLUGIN_ROOT}"
+    "${PLUGIN_PACKAGE_HELPER}" validate "${PLUGIN_ROOT}"
 )
 UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}" \
-  uv run --no-project python "${PLUGIN_CREATOR_ROOT}/scripts/update_plugin_cachebuster.py" \
-  "${PLUGIN_ROOT}"
+  uv run --no-project python "${PLUGIN_PACKAGE_HELPER}" cachebuster "${PLUGIN_ROOT}"
 codex plugin add "zhenyun-pangu-toolkit@${MARKETPLACE_NAME}"
 
 PLUGIN_VERSION="$(

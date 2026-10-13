@@ -58,6 +58,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` / `archery_resolve_workflow_target` / `archery_workflow_sqlcheck` / `archery_submit_workflow` | 双站点只读查询与租户/库/实例发现；按审批组和实例名称解析审批所需数字 ID；用户明确要求时校验并提交纯 DML 审批工单，不执行 SQL |
 | `es_*` | `es_search` / `es_count` / `es_get` | 工作台 ES 的 prod/dev/test 只读查询；禁止写入，单次最多返回 `ES_MAX_SIZE` 条 |
 | 脚本身份发现 | `search_adapter_scripts` / `search_standalone_scripts` | 只按租户、服务、编码或描述发现候选；命中后使用 `zhenyun-script-platform-mcp` 的 `adapter_get` / `independent_script_get` 读取权威当前态 |
+| Marmot 静态审查 | `check_marmot_script_static` | 本地词法检查与调用方提供的需求规则，不执行脚本；`rules_json.allowed_runtime_modules` 仅放行经目标运行时核实的精确 Marmot 模块字面量 require，不允许 Node、动态或相对路径加载。`ok=true` 只证明调用成功，检查结果看 `status/findings`，不证明生产运行或部署 |
 | `choerodon_*` | `choerodon_list_projects` / `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_preview_comment` / `choerodon_add_comment` / `choerodon_update_comment` / `choerodon_delete_comment` | 业务系统能力：猪齿鱼协作；评论预览为离线只读，新增、按版本编辑和删除是写操作，用户明确要求且目标与内容可确定时直接提交并回读；预览仅在用户要求时使用 |
 | `gitlab_*` | `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 仅对已知 project/ref/path 做精确读取；`gitlab_search_projects/code` 默认不注册，避免失败后回退 |
 | `search_repo` | `search_repo` | 普通代码检索的默认入口：跨本地代码仓库搜索（内容 / 文件名 / 模块结构） |

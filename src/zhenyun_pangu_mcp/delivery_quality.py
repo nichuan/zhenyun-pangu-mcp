@@ -54,6 +54,15 @@ def _string_list(value: Any, name: str) -> list[str]:
     return [item for item in value if item]
 
 
+def _allowed_runtime_modules(value: Any) -> set[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("allowed_runtime_modules 必须是字符串数组")
+    platform_module = r"@M/(?:v1/[A-Za-z0-9][A-Za-z0-9_-]*|2021/(?:std|biz|other))"
+    if any(re.fullmatch(platform_module, item) is None for item in value):
+        raise ValueError("allowed_runtime_modules 仅允许精确的平台 @M/v1/<module> 或 @M/2021/std|biz|other 路径")
+    return set(value)
+
+
 def _line_number(source: str, position: int) -> int:
     return source.count("\n", 0, position) + 1
 
@@ -105,9 +114,12 @@ def static_check_script(
       - required_constants: parameter -> required literal value;
       - required_log_stages: names from ``LOG_STAGE_PATTERNS``;
       - full_scope_required: whether paging must show an all-page traversal marker.
+      - allowed_runtime_modules: exact platform module paths verified for the target runtime;
+        only literal require calls to these modules are exempt from the Node runtime check.
     """
     text = source or ""
     rules = _parse_json_object(rules_json, "rules_json")
+    allowed_runtime_modules = _allowed_runtime_modules(rules.get("allowed_runtime_modules", []))
     numeric_id_fields = set(_string_list(rules.get("numeric_id_fields"), "numeric_id_fields"))
     forbidden_direct_fields = _string_list(rules.get("forbidden_direct_fields"), "forbidden_direct_fields")
     forbidden_service_parameters = _string_list(
@@ -131,10 +143,25 @@ def static_check_script(
     for code, pattern, message in (
         ("commonjs_export", r"\b(module\.exports|exports\.)", "禁止使用 CommonJS 导出"),
         ("esm_syntax", r"(^|\n)\s*(import\s+|export\s+)", "禁止使用 ESM import/export"),
-        ("node_global", r"\brequire\s*\(", "禁止依赖 Node.js require 运行时"),
         ("browser_global", r"\b(window|document)\.", "禁止依赖浏览器全局对象"),
     ):
         _add_match(findings, text, code, "error", message, pattern, flags=re.IGNORECASE | re.MULTILINE)
+
+    allowed_require_positions = {
+        match.start()
+        for match in re.finditer(
+            r"(?<![\w$.])require\s*\(\s*(['\"])(?P<module>[^'\"\\\r\n]*)\1\s*\)", text,
+        )
+        if match.group("module") in allowed_runtime_modules
+    }
+    for match in re.finditer(r"\brequire\s*\(", text, flags=re.IGNORECASE):
+        if match.start() not in allowed_require_positions:
+            line, evidence = _evidence(text, match.start())
+            findings.append(Finding(
+                "node_global", "error", "禁止依赖未经核实的 require 运行时或 Node.js 模块",
+                line, evidence,
+            ))
+            break
 
     for match in re.finditer(
         r"(?:_\.isEmpty|isEmpty)\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*([A-Za-z_$][\w$]*)\s*\)",
