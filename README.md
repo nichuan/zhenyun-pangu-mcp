@@ -26,6 +26,7 @@
 > - **ES 只读能力**：`es_search` / `es_count` / `es_get`（prod/dev/test，未配置时返回明确降级提示）
 > - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，以只读查询为主，评论新增、编辑和删除为需授权的写操作）
 > - **代码与脚本能力**：`search_repo`（本地跨仓搜索）+ `search_adapter_scripts` / `search_standalone_scripts`（只发现脚本身份）+ 已知路径的 `gitlab_list_branches/list_tree/get_file` 精确读取。当前脚本正文统一由 Script Platform MCP 获取；GitLab 项目/代码搜索默认禁用。
+> - **本地交付配置**：`marmot_get_delivery_config` 只读查询 `.env` 的 `MARMOT_DELIVERY_ROOT`。用户未指定输出目录时先查询，有效配置直接使用，不重复询问路径。
 >
 > **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼查询类（`choerodon_*_issue` / `choerodon_list_*` / `choerodon_search_*` / `choerodon_get_*` / `choerodon_download_*`）、代码检索为**只读**，Agent 可自主调用。`archery_query` 的用户 SQL 允许单条 `SELECT`、`EXPLAIN SELECT`、`SHOW CREATE TABLE`；SELECT 支持 JOIN、EXISTS、只读子查询、UNION、CASE、IN 值列表和白名单无副作用函数，也接受 SQL 开头的普通 Mapper 标记注释。仍拒绝其它 `SHOW/DESC`、`WITH`、多语句、可执行注释、窗口函数、非白名单函数或任何写入语法；实例/库/表结构由专用工具提供。本 MCP 不直接执行生产 INSERT/UPDATE/DELETE；用户明确要求提交数据修复工单时，只把已核验的 DML 交给 `archery_workflow_sqlcheck`，通过后用一次性凭证调用 `archery_submit_workflow` 创建审批工单，提交工单不等于执行 SQL。认知层的 `search_*` / `get_*` / `diagnose_context` / `list_sql_templates` 为只读；`save_*`、`update_*`、`delete_*`、`add_table_relation`、`upsert_table_knowledge` 和使用统计工具会写入 knowledge_docs / sql_templates / table_catalog / table_relations 元数据，不影响业务数据，调用前应确认沉淀内容。`choerodon_add_comment`、`choerodon_update_comment` 和 `choerodon_delete_comment` 会真实修改猪齿鱼评论，用户明确要求写入且目标与正文可确定时直接提交并回读，无须强制预览或再次确认；删除须核对目标；新增/编辑正文传规范 Markdown，由工具渲染为 HTML。
 
@@ -241,8 +242,17 @@ uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
 | | `ADAPTER_SCRIPT_CACHE_*` / `ADAPTER_SCRIPT_*_LINES` / `ADAPTER_SCRIPT_MAX_RANGE_CHARS` | 仅旧正文工具启用时使用的解码缓存与返回范围配置 |
 | Embedding | `CF_API_TOKEN` / `CF_ACCOUNT_ID` / `CF_EMBED_MODEL` / `CF_EMBEDDING_DIMENSION` | Cloudflare Workers AI 凭据（默认 `@cf/qwen/qwen3-embedding-0.6b` / 1024 维），向量写单列 `embedding`；未配置时语义检索降级为关键词 |
 | 其他 | `PG_ROOT` | 本地跨仓搜索根目录（默认本仓库根） |
+| 本地交付 | `MARMOT_DELIVERY_ROOT` | Marmot 产物根目录，绝对路径或 `~/...`，无默认值；每次调用重读 `.env`，宿主显式环境变量优先 |
+| 配置加载 | `MCP_ENV_DIR` | `.env` 所在目录；插件通过此变量读取工作区配置，不复制 `.env` 到缓存 |
 
 > 凭据请勿提交 git；`.env` 已由 `.gitignore` 排除，仅 `.env.example`（占位符版）入库。
+
+`marmot_get_delivery_config` 的 `ok` 表示查询完成，`valid` 表示目录是否可用；返回
+`config_source`、`env_file`、`status`、`output_root` 和 MCP 进程的可写性，不返回其它配置或秘密。
+`missing_env_file`、`not_configured`、`invalid_path`、`not_directory` 和 `not_writable` 分别说明
+配置文件未加载、键为空、路径不合法、路径是文件和权限不足；工具未暴露是插件加载问题，
+不能认定 `.env` 未配置。不存在的目录只检查最近已有父目录，不创建目录。Agent 实际写文件
+仍受宿主权限控制。新增工具需重新加载插件；之后仅修改 `.env` 的路径不需要重启 MCP。
 
 ## 输出与错误规范（Agent 可据此判断）
 

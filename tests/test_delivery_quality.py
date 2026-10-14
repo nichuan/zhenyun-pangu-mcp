@@ -217,7 +217,7 @@ def test_new_delivery_tools_are_exposed():
         "query_script_trace",
         "inspect_object_relation",
         "check_marmot_script_static",
+        "marmot_get_delivery_config",
     } <= set(tools)
-    assert "marmot_get_delivery_config" not in tools
     assert "validate_price_service_contract" not in tools
     assert "validate_external_service_contract" not in tools

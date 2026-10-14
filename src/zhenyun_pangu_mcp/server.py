@@ -27,7 +27,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Settings as FastMCPSettings
 
 from . import (
-    adapter_scripts, archery, choerodon, delivery_quality, es, loki, search,
+    adapter_scripts, archery, choerodon, delivery_config, delivery_quality, es, loki, search,
     sls, sls_config, gitlab, standalone_scripts,
 )
 from .config import (
@@ -52,6 +52,8 @@ mcp = FastMCP(
         "Script discovery tools only locate adapter/independent identities; use "
         "zhenyun-script-platform-mcp as the authoritative source for current script body, "
         "version, debug, save, and deployment. "
+        "For local Marmot delivery without a user-specified output path, call "
+        "marmot_get_delivery_config to read MARMOT_DELIVERY_ROOT before asking for a directory. "
         "When skills are unavailable or a task crosses workflows, use get_workflow_guide; "
         "otherwise call the specific tool directly. Reuse scoped evidence, verify live facts, "
         "and do not treat tool annotations as user authorization."
@@ -142,6 +144,23 @@ def _ok(data: object, source: str) -> str:
         meta.setdefault("source", source)
         meta.setdefault("observed_at", _now_str())
     return _json(data)
+
+
+# ============================================================================
+# 本地交付配置（只读）
+# ============================================================================
+
+@_tool()
+def marmot_get_delivery_config() -> str:
+    """读取 .env 的 MARMOT_DELIVERY_ROOT 交付根目录；只读、不创建目录、不返回凭据。
+
+    用户未指定本次输出目录时先调用本工具。valid=true 时直接使用 output_root，无须
+    再次确认路径。每次重读 MCP_ENV_DIR 指向的 .env；宿主显式环境变量优先。
+    返回配置来源、env_file、status、绝对路径及 MCP 进程的可写性；Agent 文件写权限
+    仍由宿主控制。valid=false 时按 status 区分配置文件缺失、键为空、路径或权限错误，
+    不回退到 cwd、Skill 目录或固定工程。工具不可用是插件能力问题，不代表未配置。
+    """
+    return _ok(delivery_config.get_delivery_config(), "local-config")
 
 
 # ============================================================================

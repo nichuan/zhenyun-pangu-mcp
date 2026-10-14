@@ -44,6 +44,7 @@ READ_ONLY_TOOLS = frozenset({
     'gitlab_search_projects',
     'inspect_object_relation',
     'list_sql_templates',
+    'marmot_get_delivery_config',
     'obs_log_datasources',
     'obs_log_query',
     'obs_log_trace',
@@ -85,7 +86,7 @@ DESTRUCTIVE_TOOLS = frozenset({
     "update_knowledge", "delete_knowledge", "update_sql_template",
     "delete_sql_template", "add_table_relation", "upsert_table_knowledge",
 })
-LOCAL_TOOLS = frozenset({"search_repo", "check_marmot_script_static", "get_workflow_guide", "choerodon_preview_comment"})
+LOCAL_TOOLS = frozenset({"search_repo", "check_marmot_script_static", "get_workflow_guide", "choerodon_preview_comment", "marmot_get_delivery_config"})
 
 
 def tool_annotations(name: str) -> ToolAnnotations:

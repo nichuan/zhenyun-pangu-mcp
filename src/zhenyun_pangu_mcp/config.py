@@ -11,14 +11,20 @@ import json as _json
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 # uvx/uv run 下 cwd 不一定是项目目录,支持用 MCP_ENV_DIR 显式指定 .env 目录
-_ENV_DIR = os.getenv("MCP_ENV_DIR")
+_ENV_DIR = os.getenv("MCP_ENV_DIR", "").strip()
+# 在 load_dotenv 注入变量前保留宿主显式覆盖，交付查询才能实时重读 .env，
+# 而不被启动时注入 os.environ 的旧值遮蔽。
+_MARMOT_DELIVERY_ROOT_OVERRIDE = os.getenv("MARMOT_DELIVERY_ROOT")
 if _ENV_DIR:
-    load_dotenv(os.path.join(_ENV_DIR, ".env"))
+    _ENV_FILE = (Path(_ENV_DIR).expanduser() / ".env").resolve()
 else:
-    load_dotenv()
+    _discovered_env = find_dotenv()
+    _ENV_FILE = Path(_discovered_env).resolve() if _discovered_env else None
+if _ENV_FILE is not None:
+    load_dotenv(_ENV_FILE)
 
 # 包根目录(用于回退默认路径)
 PKG_ROOT = Path(__file__).resolve().parent.parent.parent  # .../zhenyun-pangu-mcp
