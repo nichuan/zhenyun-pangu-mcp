@@ -669,13 +669,15 @@ def _choerodon_call(dispatch_name: str, **kwargs) -> str:
         # 写请求可能已到达服务端；结果不确定时先回读，不自动重试。
         retryable = dispatch_name not in {"create_comment", "update_comment", "delete_comment"}
         return _err("choerodon", str(e), retryable=retryable)
+    except ValueError as e:
+        return _err("bad_param", str(e), retryable=False)
     except Exception as e:  # 其它未知异常,不抛 500
         return _err("choerodon", f"{type(e).__name__}: {e}", retryable=False)
 
 
 @_tool()
 def choerodon_list_projects(keyword: str = "", size: int = 100) -> str:
-    """列出或搜索当前账号可访问的猪齿鱼项目；只读，返回真实 projectId 与 JSON ok/error.retryable。"""
+    """实时查询可访问的猪齿鱼项目；keyword 支持 ID、名称、编码或完整任务编号，返回真实 projectId。"""
     return _choerodon_call("list_projects", keyword=keyword, size=size)
 
 
@@ -693,7 +695,7 @@ def choerodon_list_issue(
     size: int = 20,
     project_id: str = "",
 ) -> str:
-    """按关键词、经办人或状态查询猪齿鱼任务；只读，返回 JSON ok 或 error.retryable。"""
+    """查询猪齿鱼任务；完整编号自动按前缀匹配可访问项目并精确查号，支持大小写及 sass→saas 别名，返回 resolution/projectId 供详情、评论、附件沿用。未知前缀或显式项目冲突报不可重试错误；普通关键词/纯数字沿用指定或默认项目。只读。"""
     return _choerodon_call(
         "list_issue", keyword=keyword, assignee=assignee, status=status,
         size=size, project_id=project_id or None,

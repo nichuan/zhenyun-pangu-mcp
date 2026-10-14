@@ -188,6 +188,13 @@ uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
 
 ## 打包为 Codex 插件
 
+猪齿鱼完整任务编号可直接传入 `choerodon_list_issue(keyword="H-SAAS-4900")`，无需预先填写项目 ID。
+工具按当前账号可访问项目的真实 `code` 定位（支持多段编码、大小写以及明确的 `sass→saas` 兼容别名），
+精确匹配编号并返回 `resolution.projectId`、项目名称和规范编号；后续详情、评论和附件必须沿用该项目 ID。
+项目目录在进程内缓存 5 分钟，未识别前缀仅刷新一次；`choerodon_list_projects` 始终实时刷新目录，
+也支持完整编号定位项目。未知前缀、停用项目和显式项目冲突不会回退默认项目或逐项目尝试；
+只有无完整编号的普通关键词、按人或纯数字短号查询仍使用指定/默认项目。任务数据不缓存。
+
 工作区中的 `custom-skills/`、本 MCP 与独立的 `zhenyun-script-platform-mcp` 已打包为个人插件
 `zhenyun-pangu-toolkit`。
 修改任意 skill 或 MCP 源码后，在本目录执行：
