@@ -531,11 +531,18 @@ def archery_list_instances(site: Literal["", "cn", "aws"] = "") -> str:
 
 @_tool()
 def archery_resolve_workflow_target(
-    group_name: str,
     instance_name: str,
+    group_name: str = "",
     site: Literal["cn", "aws"] = "cn",
 ) -> str:
-    """按 Archery SQL 上线表单中当前账号可选的审批组和可写实例名称，解析已核实的数字 group_id 与 instance_id；不创建工单、不执行 SQL。"""
+    """提交审批前通过 HTTP 自动解析 group_id/instance_id，不启动浏览器、不让用户提供数字 ID。
+
+    instance_name 复用本次已核实的修复实例，接受 prod/dev/test/aws 等别名或真实名称；
+    site 必须与修复环境一致。group_name 可省略：查询当前账号可见审批组的 can_write
+    实例，精确唯一匹配才返回；多个匹配只需选择返回的审批组名称。已有明确审批组时传
+    group_name 精确匹配，不跨组回退。工具缺失、认证或接口异常应报告能力问题，不回退
+    浏览器取参。不创建工单、不执行 SQL。
+    """
     try:
         result = archery._client(site).resolve_workflow_target(group_name, instance_name)
         return _ok(result, "archery")
@@ -550,7 +557,11 @@ def archery_workflow_sqlcheck(
     db_name: str,
     site: Literal["cn", "aws"] = "cn",
 ) -> str:
-    """校验数据修复工单的纯 INSERT/UPDATE/DELETE SQL；instance_id 为已核实的 Archery 数字实例 ID。成功后返回一次性提交凭证，不执行 SQL。"""
+    """校验纯 INSERT/UPDATE/DELETE，成功返回一次性提交凭证，不执行 SQL。
+
+    instance_id 从 archery_resolve_workflow_target 返回值获取；该工具可按修复实例自动
+    发现审批组，无需打开页面或向用户索要数字 ID。
+    """
     try:
         if not db_name or not db_name.strip():
             raise archery.ArcheryParameterError("db_name 必填")
@@ -569,7 +580,12 @@ def archery_submit_workflow(
     demand_url: str = "",
     is_backup: bool = True,
 ) -> str:
-    """提交已通过 archery_workflow_sqlcheck 的原样 DML 工单；创建审批工单，不执行数据库写入。一次性凭证防止跳过校验和重复提交。"""
+    """提交已校验的原样 DML 审批工单，不执行数据库写入；凭证仅使用一次。
+
+    group_id 取自 archery_resolve_workflow_target，无需打开页面取参；workflow_name 优先
+    复用当前完整工单号，否则按修复事项生成 50 字符内标题，无需仅为标题追问用户。
+    成功以返回的 workflow_id 为准，无需打开浏览器核对；结果不明时停止，勿盲目重试。
+    """
     try:
         result = archery._client(site).submit_checked_workflow(
             check_token, workflow_name, group_id, demand_url, is_backup,

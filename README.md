@@ -56,7 +56,7 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `diagnose_context` | `diagnose_context` | 组合诊断：自动汇集 认知 → 模板 → 表 → 关系 的诊断上下文 |
 | 知识库维护写操作 | `save_knowledge` / `update_knowledge` / `delete_knowledge` / `save_sql_template` / `list_sql_templates` / `update_sql_template` / `delete_sql_template` / `record_template_usage` / `add_table_relation` / `record_table_usage` / `upsert_table_knowledge` | 沉淀、维护知识/模板/表目录/关联关系；仅写认知层元数据，不修改业务库 |
 | `obs_*` | `obs_sls_query` / `obs_sls_targets` / `obs_log_query` / `obs_log_trace` / `obs_log_datasources` | 日志能力：阿里云 SLS（国内公有云盘古 prod + 非生产 dev/test 全覆盖）+ Loki（仅 AWS 海外全环境） |
-| `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` / `archery_resolve_workflow_target` / `archery_workflow_sqlcheck` / `archery_submit_workflow` | 双站点只读查询与租户/库/实例发现；按审批组和实例名称解析审批所需数字 ID；用户明确要求时校验并提交纯 DML 审批工单，不执行 SQL |
+| `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` / `archery_resolve_workflow_target` / `archery_workflow_sqlcheck` / `archery_submit_workflow` | 双站点只读查询与租户/库/实例发现；按已核实实例通过 HTTP 自动发现唯一审批组和数字 ID，无需浏览器取参；用户明确要求时校验并提交纯 DML 审批工单，不执行 SQL |
 | `es_*` | `es_search` / `es_count` / `es_get` | 工作台 ES 的 prod/dev/test 只读查询；禁止写入，单次最多返回 `ES_MAX_SIZE` 条 |
 | 脚本身份发现 | `search_adapter_scripts` / `search_standalone_scripts` | 只按租户、服务、编码或描述发现候选；命中后使用 `zhenyun-script-platform-mcp` 的 `adapter_get` / `independent_script_get` 读取权威当前态 |
 | Marmot 静态审查 | `check_marmot_script_static` | 本地词法检查与调用方提供的需求规则，不执行脚本；`rules_json.allowed_runtime_modules` 仅放行经目标运行时核实的精确 Marmot 模块字面量 require，不允许 Node、动态或相对路径加载。`ok=true` 只证明调用成功，检查结果看 `status/findings`，不证明生产运行或部署 |
