@@ -40,8 +40,6 @@ READ_ONLY_TOOLS = frozenset({
     'gitlab_get_file',
     'gitlab_list_branches',
     'gitlab_list_tree',
-    'gitlab_search_code',
-    'gitlab_search_projects',
     'inspect_object_relation',
     'list_sql_templates',
     'marmot_get_delivery_config',

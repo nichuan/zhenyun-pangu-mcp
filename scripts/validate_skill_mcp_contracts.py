@@ -22,10 +22,7 @@ def fail(message: str) -> None:
 
 
 def main() -> int:
-    # Registration must be deterministic even if a developer has locally enabled
-    # experimental GitLab search in .env. Skills intentionally target the default
-    # supported surface where those two tools are not exposed.
-    os.environ["GITLAB_SEARCH_ENABLED"] = "false"
+    # Legacy script body readers remain hidden unless a rollback explicitly enables them.
     os.environ["PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS"] = "false"
     sys.path.insert(0, str(MCP_ROOT / "src"))
     sys.path.insert(0, str(SCRIPT_PLATFORM_ROOT / "src"))

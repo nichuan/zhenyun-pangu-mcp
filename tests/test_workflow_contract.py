@@ -64,7 +64,7 @@ def test_stdio_client_can_discover_and_read_guide_without_credentials(tmp_path):
     async def run():
         params = StdioServerParameters(
             command=sys.executable, args=["-m", "zhenyun_pangu_mcp"],
-            env={"PYTHONPATH": str(ROOT / "src"), "MCP_ENV_DIR": str(tmp_path), "GITLAB_SEARCH_ENABLED": "false"},
+            env={"PYTHONPATH": str(ROOT / "src"), "MCP_ENV_DIR": str(tmp_path), "GITLAB_SEARCH_ENABLED": "true"},
         )
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:

@@ -132,25 +132,12 @@ GITLAB_BASE_URL = os.getenv("GITLAB_BASE_URL", "https://open-gitlab.going-link.c
 GITLAB_TOKEN = os.getenv("GITLAB_TOKEN", "")
 GITLAB_USERNAME = os.getenv("GITLAB_USERNAME", "")
 GITLAB_PASSWORD = os.getenv("GITLAB_PASSWORD", "")
-# 当前自托管 GitLab 未启用可靠的项目/代码搜索。默认不向 MCP 客户端暴露
-# gitlab_search_*，避免 Agent 先等待失败再回退本地；精确的分支/目录/文件读取
-# 能力仍可独立使用。平台能力恢复后需显式开启。
-GITLAB_SEARCH_ENABLED = os.getenv("GITLAB_SEARCH_ENABLED", "false").strip().lower() in {
-    "1", "true", "yes", "on",
-}
-
 # Script Platform MCP 已接管权威当前源码读取、Debug、保存和部署。Pangu 默认只暴露
 # 两个脚本身份发现工具；旧 info/source/source-search 保留为短期回滚实现，但不进入默认
 # MCP 工具面，避免 Agent 在两个 MCP 之间随机选择正文来源。
 PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS = os.getenv(
     "PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS", "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
-# 代码搜索根目录(限定在该 group / 根 project 下,避免全站噪声)
-# 仅传其一:PROJECT_ID 优先;GROUP 用于 /search 范围限定
-GITLAB_SEARCH_ROOT_ID = os.getenv("GITLAB_SEARCH_ROOT_ID", "")
-GITLAB_SEARCH_ROOT_GROUP = os.getenv("GITLAB_SEARCH_ROOT_GROUP", "srm")
-GITLAB_SEARCH_DEFAULT_SCOPE = os.getenv("GITLAB_SEARCH_DEFAULT_SCOPE", "srm")
-
 # ---------------------------------------------------------------------------
 # 跨仓代码搜索根目录(纯本地遍历)。
 # 默认回退到本 MCP 包目录(PKG_ROOT),而非整仓上层(REPO_ROOT),避免 search_repo

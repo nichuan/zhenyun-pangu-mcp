@@ -7,7 +7,7 @@
   - search_*_scripts 适配器/独立脚本身份发现（当前正文改由 Script Platform MCP 读取）
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
   - search_repo 跨仓代码搜索（内置纯标准库文件遍历，零外部依赖）
-  - gitlab_*    已知 GitLab 项目/分支/路径的精确读取（搜索默认禁用）
+  - gitlab_*    已知 GitLab 项目/分支/路径的精确读取（无项目/代码搜索工具）
   - search/get/save_* 认知层知识、SQL 模板、表目录和关联关系检索/维护
 
 工具选择原则：按缺失事实选择最短入口；规则/历史方案不明时才查认知层，当前事实由
@@ -33,7 +33,6 @@ from . import (
 from .config import (
     ARCHERY_INSTANCE_ALIASES,
     ARCHERY_DEFAULT_DB,
-    GITLAB_SEARCH_ENABLED,
     LOKI_PLATFORMS,
     PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS,
 )
@@ -1082,76 +1081,10 @@ def check_marmot_script_static(
         return _err("static_check", str(e), retryable=False)
 
 
-# ============================================================================
-# gitlab_* 代码平台（GitLab 仓库：项目/代码/文件/目录/分支，整合自 gitlab-code-mcp）
-# ============================================================================
-
-@_tool()
-def gitlab_search_projects(query: str, per_page: int = 20) -> str:
-    """搜索 GitLab 项目；仅在配置显式启用时注册，默认不暴露，返回 JSON ok 或 error.retryable。"""
-    if not GITLAB_SEARCH_ENABLED:
-        return _err(
-            "capability_disabled",
-            "GitLab 项目/代码搜索当前未启用，请直接使用 search_repo 检索本地代码。",
-            retryable=False,
-        )
-    try:
-        client = gitlab.GitLabClient()
-        items = client.list_projects(query, per_page=per_page)
-        slim = [
-            {
-                "id": p.get("id"),
-                "name": p.get("name"),
-                "path_with_namespace": p.get("path_with_namespace"),
-                "web_url": p.get("web_url"),
-                "default_branch": p.get("default_branch"),
-            }
-            for p in items
-        ]
-        return _ok({"count": len(slim), "projects": slim}, "gitlab")
-    except gitlab.GitLabError as e:
-        return _err("gitlab", str(e), retryable=True)
-
-
-@_tool()
-def gitlab_search_code(query: str, per_page: int = 20) -> str:
-    """搜索 GitLab 代码；仅在配置显式启用时注册，默认不暴露，返回 JSON ok 或 error.retryable。"""
-    if not GITLAB_SEARCH_ENABLED:
-        return _err(
-            "capability_disabled",
-            "GitLab 项目/代码搜索当前未启用，请直接使用 search_repo 检索本地代码。",
-            retryable=False,
-        )
-    try:
-        client = gitlab.GitLabClient()
-        results = client.search_code(query, per_page=per_page)
-        slim = [
-            {
-                "project_id": r.get("project_id"),
-                "path_with_namespace": r.get("path_with_namespace"),
-                "path": r.get("path"),
-                "filename": r.get("filename"),
-                "startline": r.get("startline"),
-                "data": (r.get("data") or "")[:300],
-                "ref": r.get("ref"),
-            }
-            for r in results
-        ]
-        return _ok({"count": len(slim), "results": slim}, "gitlab")
-    except gitlab.GitLabError as e:
-        return _err("gitlab", str(e), retryable=True)
-
-
-# 已知不可用的搜索能力不暴露给 Agent，避免每次先等待失败再回退本地。
-# 精确分支、目录和文件读取工具在下方继续独立注册。
-if not GITLAB_SEARCH_ENABLED:
-    mcp.remove_tool("gitlab_search_projects")
-    mcp.remove_tool("gitlab_search_code")
-
-
+# GitLab exact-read tools require a project/path already supplied by the user or evidence.
 @_tool()
 def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
-    """读取已知 GitLab project/ref/path 的文件；只读，不用枚举绕过搜索禁用，返回 JSON ok 或 error.retryable。"""
+    """读取已知 GitLab project/ref/path 的文件；只读，不发现或遍历项目，返回 JSON ok 或 error.retryable。"""
     try:
         content = gitlab.GitLabClient().get_file(project_id, path, ref=ref)
         return _ok({"project_id": project_id, "path": path, "ref": ref, "content": content}, "gitlab")

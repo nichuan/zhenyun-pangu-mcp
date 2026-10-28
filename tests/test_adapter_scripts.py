@@ -198,7 +198,7 @@ def test_search_requires_a_scope(service):
         script_service.search_scripts()
 
 
-def test_disabled_gitlab_search_tools_are_not_exposed():
+def test_gitlab_search_tools_are_removed():
     tools = server.mcp._tool_manager._tools
 
     assert "gitlab_search_projects" not in tools
@@ -209,9 +209,3 @@ def test_disabled_gitlab_search_tools_are_not_exposed():
     assert "search_adapter_script_source" not in tools
 
 
-def test_disabled_gitlab_search_fails_fast_without_network():
-    result = json.loads(server.gitlab_search_code("SomeClass"))
-
-    assert result["ok"] is False
-    assert result["error"]["code"] == "capability_disabled"
-    assert result["error"]["retryable"] is False
