@@ -235,6 +235,33 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 
+# ---------------------------------------------------------------------------
+# Nexus 中心仓库（Maven 私服等,只读访问;供 nexus_* 工具使用）
+# 地址 + 账号密码登录(HTTP Basic)。未配置 NEXUS_BASE_URL 时 nexus_* 工具返回明确提示。
+# 铁律:仅搜索/读取/受控下载,严禁上传、删除、改仓库配置等任何写操作。
+# ---------------------------------------------------------------------------
+NEXUS_BASE_URL = os.getenv("NEXUS_BASE_URL", "").strip().rstrip("/")
+NEXUS_USERNAME = os.getenv("NEXUS_USERNAME", "")
+NEXUS_PASSWORD = os.getenv("NEXUS_PASSWORD", "")
+NEXUS_VERIFY_SSL = os.getenv("NEXUS_VERIFY_SSL", "true").lower() in (
+    "1", "true", "yes", "on",
+)
+try:
+    NEXUS_TIMEOUT = max(5, int(os.getenv("NEXUS_TIMEOUT", "30")))
+except ValueError:
+    NEXUS_TIMEOUT = 30
+try:
+    NEXUS_MAX_DOWNLOAD_MB = max(1, int(os.getenv("NEXUS_MAX_DOWNLOAD_MB", "500")))
+except ValueError:
+    NEXUS_MAX_DOWNLOAD_MB = 500
+NEXUS_DOWNLOAD_DIR = (
+    os.getenv("NEXUS_DOWNLOAD_DIR", "").strip()
+    or str(Path.home() / ".nexus-mcp-downloads")
+)
+# 默认仓库名(可选;为空时 nexus_search 需显式传 repository 或用 q 全库搜索)
+NEXUS_DEFAULT_REPOSITORY = os.getenv("NEXUS_DEFAULT_REPOSITORY", "").strip()
+
+
 def get_supabase_url() -> str:
     if not SUPABASE_URL:
         raise RuntimeError("缺少 SUPABASE_URL，请在 .env 配置知识库连接。")
