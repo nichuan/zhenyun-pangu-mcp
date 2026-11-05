@@ -8,6 +8,7 @@
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
   - search_repo 跨仓代码搜索（内置纯标准库文件遍历，零外部依赖）
   - gitlab_*    已知 GitLab 项目/分支/路径的精确读取（无项目/代码搜索工具）
+  - nexus_*     Nexus 中心仓库只读访问（仓库列表/组件与资产搜索/GAV 直读/受控下载）
   - search/get/save_* 认知层知识、SQL 模板、表目录和关联关系检索/维护
 
 工具选择原则：按缺失事实选择最短入口；规则/历史方案不明时才查认知层，当前事实由
@@ -27,8 +28,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Settings as FastMCPSettings
 
 from . import (
-    adapter_scripts, archery, choerodon, delivery_config, delivery_quality, es, loki, search,
-    sls, sls_config, gitlab, standalone_scripts,
+    adapter_scripts, archery, choerodon, delivery_config, delivery_quality, es, loki, nexus,
+    search, sls, sls_config, gitlab, standalone_scripts,
 )
 from .config import (
     ARCHERY_INSTANCE_ALIASES,
@@ -1127,6 +1128,168 @@ def gitlab_list_branches(project_id: str, per_page: int = 50) -> str:
         return _ok({"count": len(slim), "branches": slim}, "gitlab")
     except gitlab.GitLabError as e:
         return _err("gitlab", str(e), retryable=True)
+
+
+# ============================================================================
+# nexus_* Nexus 中心仓库只读访问（搜索/读取/受控下载；严禁上传、删除、改配置）
+# 未配置 NEXUS_BASE_URL 时返回 nexus_unconfigured，提示按 .env.example 补齐。
+# ============================================================================
+
+def _nexus_failure(e: nexus.NexusError, code: str = "nexus") -> str:
+    message = str(e)
+    retryable = "认证/授权失败" not in message and "拒绝" not in message
+    return _err(code if retryable else "nexus_auth", message, retryable=retryable)
+
+
+@_tool()
+def nexus_list_repositories() -> str:
+    """列出 Nexus 中心仓库全部仓库及格式/类型；只读，返回 JSON ok 或 error.retryable。"""
+    try:
+        repos = nexus.get_client().list_repositories()
+        return _ok({"count": len(repos), "repositories": repos}, "nexus")
+    except nexus.NexusError as e:
+        return _nexus_failure(e, "nexus_repositories")
+
+
+@_tool()
+def nexus_search(
+    q: str = "",
+    repository: str = "",
+    group: str = "",
+    name: str = "",
+    version: str = "",
+    extension: str = "",
+    classifier: str = "",
+    limit: int = 50,
+    continuation_token: str = "",
+) -> str:
+    """在 Nexus 搜索 Maven 组件（group/name/version 精确过滤优先于 q 全文）；只读，返回 JSON ok 或 error.retryable。"""
+    if not any(value.strip() for value in (q, repository, group, name)):
+        return _err(
+            "bad_param",
+            "q、repository、group、name 至少提供一项非空值，不支持全库无条件列举",
+            retryable=False,
+        )
+    try:
+        limit = _bounded_limit(limit, 200)
+        client = nexus.get_client()
+        result = client.search(
+            q=q.strip(), repository=repository.strip() or client.default_repository(),
+            group=group.strip(), name=name.strip(), version=version.strip(),
+            extension=extension.strip(), classifier=classifier.strip(),
+            limit=limit, continuation_token=continuation_token.strip(),
+        )
+        return _ok(result, "nexus")
+    except nexus.NexusError as e:
+        return _nexus_failure(e, "nexus_search")
+
+
+_advertise_nonempty_any_of("nexus_search", "q", "repository", "group", "name")
+
+
+@_tool()
+def nexus_search_assets(
+    q: str = "",
+    repository: str = "",
+    group: str = "",
+    name: str = "",
+    version: str = "",
+    extension: str = "",
+    classifier: str = "",
+    limit: int = 50,
+    continuation_token: str = "",
+) -> str:
+    """在 Nexus 按文件（资产）粒度搜索并返回可下载的 download_url；只读，返回 JSON ok 或 error.retryable。"""
+    if not any(value.strip() for value in (q, repository, group, name)):
+        return _err(
+            "bad_param",
+            "q、repository、group、name 至少提供一项非空值，不支持全库无条件列举",
+            retryable=False,
+        )
+    try:
+        limit = _bounded_limit(limit, 200)
+        client = nexus.get_client()
+        result = client.search_assets(
+            q=q.strip(), repository=repository.strip() or client.default_repository(),
+            group=group.strip(), name=name.strip(), version=version.strip(),
+            extension=extension.strip(), classifier=classifier.strip(),
+            limit=limit, continuation_token=continuation_token.strip(),
+        )
+        return _ok(result, "nexus")
+    except nexus.NexusError as e:
+        return _nexus_failure(e, "nexus_search_assets")
+
+
+_advertise_nonempty_any_of("nexus_search_assets", "q", "repository", "group", "name")
+
+
+@_tool()
+def nexus_check_maven_artifact(
+    group: str,
+    name: str,
+    version: str,
+    repository: str = "",
+    extensions: str = "pom,jar",
+    classifier: str = "",
+) -> str:
+    """按 Maven GAV 坐标直读探测构件是否存在（pom/jar 等，SNAPSHOT 自动解析时间戳文件）；只读 HEAD 不落盘。"""
+    if not all(value.strip() for value in (group, name, version)):
+        return _err("bad_param", "group、name、version 均为必填", retryable=False)
+    try:
+        result = nexus.get_client().check_maven_artifact(
+            group=group, name=name, version=version,
+            repository=repository, extensions=extensions, classifier=classifier,
+        )
+        return _ok(result, "nexus")
+    except nexus.NexusError as e:
+        return _nexus_failure(e, "nexus_check_maven")
+
+
+@_tool()
+def nexus_get_maven_metadata(
+    group: str,
+    name: str,
+    repository: str = "",
+) -> str:
+    """直读 maven-metadata.xml 返回构件可用版本列表/latest/release；只读，适用于无浏览权限的仓库。"""
+    if not all(value.strip() for value in (group, name)):
+        return _err("bad_param", "group、name 均为必填", retryable=False)
+    try:
+        result = nexus.get_client().get_maven_metadata(
+            group=group, name=name, repository=repository,
+        )
+        return _ok(result, "nexus")
+    except nexus.NexusError as e:
+        return _nexus_failure(e, "nexus_maven_metadata")
+
+
+@_tool()
+def nexus_download_artifact(
+    asset_url: str = "",
+    repository: str = "",
+    asset_path: str = "",
+    dest_dir: str = "",
+    filename: str = "",
+) -> str:
+    """下载单个 Nexus 构件（jar/pom 等）到本地目录并返回 sha256；asset_url 须来自 nexus_search* 结果，或传 asset_path。"""
+    if not asset_url.strip() and not asset_path.strip():
+        return _err(
+            "bad_param",
+            "请传 asset_url（来自 nexus_search*/search_assets 结果的 download_url），"
+            "或传 asset_path（repository 缺省时用默认仓库）",
+            retryable=False,
+        )
+    try:
+        result = nexus.get_client().download(
+            asset_url=asset_url.strip(),
+            repository=repository.strip(),
+            asset_path=asset_path.strip(),
+            dest_dir=dest_dir.strip(),
+            filename=filename.strip(),
+        )
+        return _ok(result, "nexus")
+    except nexus.NexusError as e:
+        return _nexus_failure(e, "nexus_download")
 
 
 # ============================================================================
