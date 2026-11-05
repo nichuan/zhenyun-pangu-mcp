@@ -404,12 +404,13 @@ class ArcheryClient:
             raise ArcheryError(payload.get("msg") or "请求失败（status 非 0）")
         return payload
 
-    def resolve_workflow_target(self, group_name: str, instance_name: str) -> dict:
-        """按当前账号可提交的资源组与实例名称解析 Archery 数字 ID。"""
+    def resolve_workflow_target(self, group_name: str = "", instance_name: str = "") -> dict:
+        """通过 HTTP 自动发现目标实例所属的唯一审批组，不启动浏览器。"""
         group_name = (group_name or "").strip()
         instance_name = (instance_name or "").strip()
-        if not group_name or not instance_name:
-            raise ArcheryParameterError("group_name 和 instance_name 均必填")
+        if not instance_name:
+            raise ArcheryParameterError("instance_name 必填：复用本次已核实的修复实例别名或真实名称")
+        instance_name = resolve_instance(instance_name, self.site, "")
 
         submit_url = urljoin(self.base_url + "/", "submitsql/")
         page = self._request_with_reauth(
@@ -423,54 +424,89 @@ class ArcheryClient:
             )
         parser = _WorkflowGroupOptionParser()
         parser.feed(page.text or "")
-        group_ids = {gid for name, gid in parser.groups if name == group_name}
-        if not group_ids:
-            raise ArcheryParameterError(
-                f"当前 Archery 账号的 SQL 上线表单中找不到审批组：{group_name}"
-            )
-        if len(group_ids) != 1:
-            raise ArcheryParameterError(f"审批组名称对应多个 group_id：{group_name}")
-        group_id = group_ids.pop()
-
-        instances_url = urljoin(self.base_url + "/", "group/instances/")
-        response = self._request_with_reauth(
-            "POST", instances_url,
-            data={"group_name": group_name, "tag_code": "can_write"},
-            headers={
-                "X-Requested-With": "XMLHttpRequest",
-                "Referer": submit_url,
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            },
-            csrf=True,
-        )
-        payload = self._parse(response)
-        rows = payload.get("data")
-        if not isinstance(rows, list):
+        groups: dict[str, set[int]] = {}
+        for name, gid in parser.groups:
+            groups.setdefault(name, set()).add(gid)
+        if group_name:
+            if group_name not in groups:
+                raise ArcheryParameterError(
+                    f"当前 Archery 账号的 SQL 上线选项中找不到审批组：{group_name}"
+                )
+            groups = {group_name: groups[group_name]}
+        if not groups:
             raise ArcheryError(
-                "Archery 未返回该审批组可提交的实例列表",
+                "当前账号未返回审批组选项，请检查 MCP 凭据、权限或接口兼容性；不要打开浏览器取参",
                 code="archery_workflow_target", retryable=False,
             )
-        matches = [
-            row for row in rows
-            if isinstance(row, dict) and row.get("instance_name") == instance_name
-        ]
-        if not matches:
-            raise ArcheryParameterError(
-                f"审批组“{group_name}”下找不到可提交实例：{instance_name}"
+        if len(groups) > 50:
+            raise ArcheryError(
+                "当前账号可见审批组超过 50 个，停止自动遍历；请缩小审批组范围",
+                code="archery_workflow_target", retryable=False,
             )
-        instance_ids = {int(row["id"]) for row in matches if str(row.get("id", "")).isdigit()}
-        if len(instance_ids) != 1:
-            raise ArcheryParameterError(
-                f"实例名称未唯一解析到数字 instance_id：{instance_name}"
+
+        instances_url = urljoin(self.base_url + "/", "group/instances/")
+        candidates = []
+        for name, group_ids in groups.items():
+            if len(group_ids) != 1:
+                raise ArcheryParameterError(f"审批组名称对应多个 group_id：{name}")
+            response = self._request_with_reauth(
+                "POST", instances_url,
+                data={"group_name": name, "tag_code": "can_write"},
+                headers={
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": submit_url,
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                },
+                csrf=True,
             )
-        return {
-            "site": self.site,
-            "group_name": group_name,
-            "group_id": group_id,
-            "instance_name": instance_name,
-            "instance_id": instance_ids.pop(),
-            "db_type": str(matches[0].get("db_type") or ""),
-        }
+            if response.status_code != 200:
+                raise ArcheryError(
+                    f"读取审批组“{name}”的可写实例失败（HTTP {response.status_code}）；不要打开浏览器取参",
+                    code="archery_workflow_target", retryable=False,
+                )
+            payload = self._parse(response)
+            rows = payload.get("data")
+            if not isinstance(rows, list):
+                raise ArcheryError(
+                    f"Archery 未返回审批组“{name}”可提交的实例列表",
+                    code="archery_workflow_target", retryable=False,
+                )
+            matches = [
+                row for row in rows
+                if isinstance(row, dict) and row.get("instance_name") == instance_name
+            ]
+            if not matches:
+                continue
+            instance_ids = {
+                int(row["id"]) for row in matches
+                if str(row.get("id", "")).isdigit() and int(row["id"]) > 0
+            }
+            if len(instance_ids) != 1 or any(
+                not str(row.get("id", "")).isdigit() or int(row["id"]) <= 0
+                for row in matches
+            ):
+                raise ArcheryParameterError(
+                    f"实例名称未唯一解析到数字 instance_id：{instance_name}（审批组：{name}）"
+                )
+            candidates.append({
+                "site": self.site,
+                "group_name": name,
+                "group_id": next(iter(group_ids)),
+                "instance_name": instance_name,
+                "instance_id": instance_ids.pop(),
+                "db_type": str(matches[0].get("db_type") or ""),
+            })
+        if not candidates:
+            raise ArcheryParameterError(
+                f"当前账号的审批组下找不到可提交实例：{instance_name}；请检查目标环境或账号权限，不要猜 ID 或打开浏览器取参"
+            )
+        if len(candidates) != 1:
+            names = "、".join(item["group_name"] for item in candidates)
+            raise ArcheryError(
+                f"实例“{instance_name}”匹配多个审批组：{names}；仅需选择审批组名称，无需提供数字 ID 或打开浏览器",
+                code="archery_workflow_target_ambiguous", retryable=False,
+            )
+        return candidates[0]
 
     def _workflow_response(self, response, operation: str, expected_status: int) -> dict:
         if response.status_code in (301, 302, 401, 403):
@@ -485,7 +521,7 @@ class ArcheryClient:
             ) from e
         if operation == "archery_submit_workflow" and response.status_code >= 500:
             raise ArcheryError(
-                "工单提交返回服务端错误，结果可能已写入；请先在 Archery 按名称核对，勿直接重试",
+                "工单提交返回服务端错误，结果可能已写入；需通过只读接口按名称查重，接口不可用则报告待核实，不回退浏览器或直接重试",
                 code="archery_submit_unknown", retryable=False,
             )
         if response.status_code != expected_status or not isinstance(payload, dict):
@@ -576,7 +612,7 @@ class ArcheryClient:
                 )
             except RequestException as e:
                 raise ArcheryError(
-                    "工单提交结果未知；请先在 Archery 按名称核对，勿直接重试",
+                    "工单提交结果未知；需通过只读接口按名称查重，接口不可用则报告待核实，不回退浏览器或直接重试",
                     code="archery_submit_unknown", retryable=False,
                 ) from e
         payload = self._workflow_response(response, "archery_submit_workflow", 201)
@@ -584,7 +620,7 @@ class ArcheryClient:
         workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
         if not workflow_id:
             raise ArcheryError(
-                "提交返回 201 但缺少工单 ID；请在 Archery 核对是否已创建，勿直接重试",
+                "提交返回 201 但缺少工单 ID；需通过只读接口查重，接口不可用则报告待核实，不回退浏览器或直接重试",
                 code="archery_submit_unknown", retryable=False,
             )
         return {

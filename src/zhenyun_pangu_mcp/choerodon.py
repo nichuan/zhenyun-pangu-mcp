@@ -62,6 +62,11 @@ class ChoerodonError(Exception):
 # 因此缓存有效期设 8 小时,期间稳定复用同一 token。
 TOKEN_TTL = 8 * 3600
 
+# 仅缓存当前账号的项目目录，不缓存任务；权限或项目编码变化最多延迟 5 分钟。
+PROJECT_CACHE_TTL = 5 * 60
+_PROJECT_CACHE: dict[tuple[str, str, str], tuple[float, list[dict]]] = {}
+ISSUE_PREFIX_ALIASES = {"sass": "saas"}
+
 
 def _load_cached_token() -> Optional[str]:
     try:
@@ -102,6 +107,7 @@ def _save_token(token: str, ttl: int = TOKEN_TTL):
 
 
 def _clear_token_cache():
+    _PROJECT_CACHE.clear()
     try:
         if os.path.exists(TOKEN_CACHE):
             os.remove(TOKEN_CACHE)
@@ -475,17 +481,8 @@ def _project_brief(project: dict) -> dict:
     }
 
 
-def list_projects(keyword: str = "", size: int = 100) -> dict:
-    """列出当前账号在组织内可访问的项目，支持按 ID/名称/编码筛选。
-
-    当前部署的 projects/paging 对查询文本的服务端筛选不稳定，因此先分页
-    获取当前账号的可访问项目，再在 MCP 内做不区分大小写的精确/模糊筛选。
-    """
-    try:
-        result_size = max(1, min(int(size), 200))
-    except (TypeError, ValueError) as e:
-        raise ChoerodonError(f"项目列表 size 必须是整数: {size}") from e
-
+def _fetch_accessible_projects() -> list[dict]:
+    """读取完整的账号项目目录；分页未完成时不提供可用于路由的目录。"""
     current_user = _request("GET", "/iam/choerodon/v1/users/self")
     if not isinstance(current_user, dict) or not current_user.get("id"):
         raise ChoerodonError("无法获取当前猪齿鱼用户 id，不能查询可访问项目")
@@ -516,8 +513,12 @@ def list_projects(keyword: str = "", size: int = 100) -> dict:
             except (TypeError, ValueError):
                 total = None
         if not batch or len(batch) < page_size or (total is not None and len(projects) >= total):
+            if total is not None and len(projects) < total:
+                raise ChoerodonError("猪齿鱼项目目录分页提前结束，不能确认完整的可访问项目")
             break
         page += 1
+    else:
+        raise ChoerodonError("猪齿鱼项目目录超过 20 页上限，未完成项目定位")
 
     # 某些项目列表可能因角色合并重复，按 projectId 稳定去重。
     unique_projects: list[dict] = []
@@ -528,10 +529,97 @@ def list_projects(keyword: str = "", size: int = 100) -> dict:
             continue
         seen.add(project_id)
         unique_projects.append(project)
+    return unique_projects
+
+
+def _project_cache_key() -> tuple[str, str, str]:
+    return BASE_URL, str(ORGANIZATION_ID), config.CHOERODON_USERNAME
+
+
+def _cached_projects() -> list[dict] | None:
+    cached = _PROJECT_CACHE.get(_project_cache_key())
+    if cached and time.monotonic() < cached[0]:
+        return cached[1]
+    return None
+
+
+def _accessible_projects(refresh: bool = False) -> list[dict]:
+    cached = None if refresh else _cached_projects()
+    if cached is not None:
+        return cached
+    projects = _fetch_accessible_projects()
+    _PROJECT_CACHE[_project_cache_key()] = (time.monotonic() + PROJECT_CACHE_TTL, projects)
+    return projects
+
+
+def _parse_issue_number(value: str) -> tuple[str, str] | None:
+    # 从最后一个连字符拆分，保留 prod-bug、H-SAAS 等多段项目编码。
+    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*)-([0-9]+)", value.strip())
+    return (match[1], match[2]) if match else None
+
+
+def _issue_project_matches(prefix: str, projects: list[dict]) -> tuple[list[dict], bool]:
+    code = prefix.casefold()
+    matches = [project for project in projects if project["code"].casefold() == code]
+    # 真实编码优先；只有不存在 sass 项目时才启用明确列出的兼容别名。
+    if matches or code not in ISSUE_PREFIX_ALIASES:
+        return matches, False
+    alias = ISSUE_PREFIX_ALIASES[code]
+    return [project for project in projects if project["code"].casefold() == alias], True
+
+
+def _resolve_issue_project(issue_num: str, project_id: str | None = None) -> dict:
+    parsed = _parse_issue_number(issue_num)
+    if parsed is None:
+        raise ValueError("任务编号必须是完整编号，例如 prod-bug-213849 或 H-SAAS-4900")
+    prefix, number = parsed
+    was_cached = _cached_projects() is not None
+    matches, alias_applied = _issue_project_matches(prefix, _accessible_projects())
+    if not matches and was_cached:
+        # 新项目或编码变更时只刷新一次，不逐个项目检索任务。
+        matches, alias_applied = _issue_project_matches(prefix, _accessible_projects(refresh=True))
+    if not matches:
+        raise ValueError(f"任务前缀 {prefix!r} 未匹配当前账号可访问的项目；未查询默认项目，请核对编号或项目权限")
+    if project_id:
+        selected = [project for project in matches if project["projectId"] == str(project_id)]
+        if not selected:
+            candidates = ", ".join(f"{project['name']} ({project['projectId']})" for project in matches)
+            raise ValueError(f"任务编号 {issue_num!r} 与指定 project_id={project_id} 冲突；编号对应 {candidates}")
+        matches = selected
+    if len(matches) != 1:
+        candidates = ", ".join(f"{project['name']} ({project['projectId']})" for project in matches)
+        raise ValueError(f"任务前缀 {prefix!r} 对应多个可访问项目：{candidates}；请明确 project_id")
+    project = matches[0]
+    if not project["enabled"]:
+        raise ValueError(f"任务前缀 {prefix!r} 对应项目 {project['name']} 已停用；未查询任务")
+    result = {
+        "projectId": project["projectId"],
+        "projectName": project["name"],
+        "projectCode": project["code"],
+        "inputIssueNum": issue_num.strip(),
+        "issueNum": f"{project['code']}-{number}",
+        "matchedBy": "project_code_alias" if alias_applied else "project_code",
+    }
+    if alias_applied:
+        result["warning"] = f"任务前缀 {prefix} 已按兼容别名纠正为 {project['code']}"
+    return result
+
+
+def list_projects(keyword: str = "", size: int = 100) -> dict:
+    """实时列出可访问项目；支持 ID、名称、编码和完整任务编号。"""
+    try:
+        result_size = max(1, min(int(size), 200))
+    except (TypeError, ValueError) as e:
+        raise ChoerodonError(f"项目列表 size 必须是整数: {size}") from e
+    # 显式项目发现始终实时读取，同时更新自动编号路由的短时目录缓存。
+    unique_projects = _accessible_projects(refresh=True)
 
     query = (keyword or "").strip().casefold()
+    parsed = _parse_issue_number(query)
     matched = unique_projects
-    if query:
+    if parsed:
+        matched, _ = _issue_project_matches(parsed[0], unique_projects)
+    elif query:
         matched = [
             project for project in unique_projects
             if any(
@@ -983,20 +1071,40 @@ CHOERODON_DISPATCH = {
 
 def list_issue_search(keyword: str = "", size: int = 20, project_id: str | None = None,
                       assignee: str = "", status: str = "") -> dict:
-    """list_issue 工具入口:支持按经办人姓名/状态名过滤。"""
+    """完整编号先按真实项目编码路由并精确匹配；其它查询保留原有过滤语义。"""
+    resolution = _resolve_issue_project(keyword, project_id) if _parse_issue_number(keyword) else None
+    if resolution:
+        project_id = resolution["projectId"]
+        keyword = resolution["issueNum"]
+
+    def result(items: list) -> dict:
+        output = {"total": len(items), "items": items}
+        if resolution:
+            output["projectId"] = project_id
+            output["resolution"] = resolution
+        return output
+
     assignee_ids = None
     if assignee:
         users = search_users(assignee, project_id=project_id)
         if not users:
-            return {"total": 0, "items": []}
+            return result([])
         assignee_ids = [u["id"] for u in users]
     status_ids = None
     if status:
         smap = get_status_map(project_id)
         sid = smap.get(status)
         if not sid:
-            return {"total": 0, "items": []}
+            return result([])
         status_ids = [sid]
     items = search_issues(keyword=keyword, size=size, project_id=project_id,
                           assignee_ids=assignee_ids, status_ids=status_ids)
-    return {"total": len(items), "items": items}
+    if resolution:
+        number = keyword.rpartition("-")[2]
+        items = [item for item in items if any(
+            str(item.get(field) or "").casefold() == keyword.casefold()
+            for field in ("issueNum", "fullIssueNum")
+        ) or str(item.get("issueNum") or "") == number]
+        for item in items:
+            item["fullIssueNum"] = keyword
+    return result(items)

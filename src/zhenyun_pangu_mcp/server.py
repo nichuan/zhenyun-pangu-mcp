@@ -7,8 +7,7 @@
   - search_*_scripts 适配器/独立脚本身份发现（当前正文改由 Script Platform MCP 读取）
   - choerodon_* 猪齿鱼协作（内置 Python 客户端，OAuth 账号密码登录）
   - search_repo 跨仓代码搜索（内置纯标准库文件遍历，零外部依赖）
-  - gitlab_*    已知 GitLab 项目/分支/路径的精确读取（搜索默认禁用）
-  - nexus_*     Nexus 中心仓库只读访问（仓库列表/组件与资产搜索/受控下载，账号密码登录）
+  - gitlab_*    已知 GitLab 项目/分支/路径的精确读取（无项目/代码搜索工具）
   - search/get/save_* 认知层知识、SQL 模板、表目录和关联关系检索/维护
 
 工具选择原则：按缺失事实选择最短入口；规则/历史方案不明时才查认知层，当前事实由
@@ -28,13 +27,12 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Settings as FastMCPSettings
 
 from . import (
-    adapter_scripts, archery, choerodon, delivery_quality, es, loki, nexus, search,
+    adapter_scripts, archery, choerodon, delivery_config, delivery_quality, es, loki, search,
     sls, sls_config, gitlab, standalone_scripts,
 )
 from .config import (
     ARCHERY_INSTANCE_ALIASES,
     ARCHERY_DEFAULT_DB,
-    GITLAB_SEARCH_ENABLED,
     LOKI_PLATFORMS,
     PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS,
 )
@@ -53,6 +51,8 @@ mcp = FastMCP(
         "Script discovery tools only locate adapter/independent identities; use "
         "zhenyun-script-platform-mcp as the authoritative source for current script body, "
         "version, debug, save, and deployment. "
+        "For local Marmot delivery without a user-specified output path, call "
+        "marmot_get_delivery_config to read MARMOT_DELIVERY_ROOT before asking for a directory. "
         "When skills are unavailable or a task crosses workflows, use get_workflow_guide; "
         "otherwise call the specific tool directly. Reuse scoped evidence, verify live facts, "
         "and do not treat tool annotations as user authorization."
@@ -143,6 +143,23 @@ def _ok(data: object, source: str) -> str:
         meta.setdefault("source", source)
         meta.setdefault("observed_at", _now_str())
     return _json(data)
+
+
+# ============================================================================
+# 本地交付配置（只读）
+# ============================================================================
+
+@_tool()
+def marmot_get_delivery_config() -> str:
+    """读取 .env 的 MARMOT_DELIVERY_ROOT 交付根目录；只读、不创建目录、不返回凭据。
+
+    用户未指定本次输出目录时先调用本工具。valid=true 时直接使用 output_root，无须
+    再次确认路径。每次重读 MCP_ENV_DIR 指向的 .env；宿主显式环境变量优先。
+    返回配置来源、env_file、status、绝对路径及 MCP 进程的可写性；Agent 文件写权限
+    仍由宿主控制。valid=false 时按 status 区分配置文件缺失、键为空、路径或权限错误，
+    不回退到 cwd、Skill 目录或固定工程。工具不可用是插件能力问题，不代表未配置。
+    """
+    return _ok(delivery_config.get_delivery_config(), "local-config")
 
 
 # ============================================================================
@@ -513,11 +530,18 @@ def archery_list_instances(site: Literal["", "cn", "aws"] = "") -> str:
 
 @_tool()
 def archery_resolve_workflow_target(
-    group_name: str,
     instance_name: str,
+    group_name: str = "",
     site: Literal["cn", "aws"] = "cn",
 ) -> str:
-    """按 Archery SQL 上线表单中当前账号可选的审批组和可写实例名称，解析已核实的数字 group_id 与 instance_id；不创建工单、不执行 SQL。"""
+    """提交审批前通过 HTTP 自动解析 group_id/instance_id，不启动浏览器、不让用户提供数字 ID。
+
+    instance_name 复用本次已核实的修复实例，接受 prod/dev/test/aws 等别名或真实名称；
+    site 必须与修复环境一致。group_name 可省略：查询当前账号可见审批组的 can_write
+    实例，精确唯一匹配才返回；多个匹配只需选择返回的审批组名称。已有明确审批组时传
+    group_name 精确匹配，不跨组回退。工具缺失、认证或接口异常应报告能力问题，不回退
+    浏览器取参。不创建工单、不执行 SQL。
+    """
     try:
         result = archery._client(site).resolve_workflow_target(group_name, instance_name)
         return _ok(result, "archery")
@@ -532,7 +556,11 @@ def archery_workflow_sqlcheck(
     db_name: str,
     site: Literal["cn", "aws"] = "cn",
 ) -> str:
-    """校验数据修复工单的纯 INSERT/UPDATE/DELETE SQL；instance_id 为已核实的 Archery 数字实例 ID。成功后返回一次性提交凭证，不执行 SQL。"""
+    """校验纯 INSERT/UPDATE/DELETE，成功返回一次性提交凭证，不执行 SQL。
+
+    instance_id 从 archery_resolve_workflow_target 返回值获取；该工具可按修复实例自动
+    发现审批组，无需打开页面或向用户索要数字 ID。
+    """
     try:
         if not db_name or not db_name.strip():
             raise archery.ArcheryParameterError("db_name 必填")
@@ -551,7 +579,12 @@ def archery_submit_workflow(
     demand_url: str = "",
     is_backup: bool = True,
 ) -> str:
-    """提交已通过 archery_workflow_sqlcheck 的原样 DML 工单；创建审批工单，不执行数据库写入。一次性凭证防止跳过校验和重复提交。"""
+    """提交已校验的原样 DML 审批工单，不执行数据库写入；凭证仅使用一次。
+
+    group_id 取自 archery_resolve_workflow_target，无需打开页面取参；workflow_name 优先
+    复用当前完整工单号，否则按修复事项生成 50 字符内标题，无需仅为标题追问用户。
+    成功以返回的 workflow_id 为准，无需打开浏览器核对；结果不明时停止，勿盲目重试。
+    """
     try:
         result = archery._client(site).submit_checked_workflow(
             check_token, workflow_name, group_id, demand_url, is_backup,
@@ -670,13 +703,15 @@ def _choerodon_call(dispatch_name: str, **kwargs) -> str:
         # 写请求可能已到达服务端；结果不确定时先回读，不自动重试。
         retryable = dispatch_name not in {"create_comment", "update_comment", "delete_comment"}
         return _err("choerodon", str(e), retryable=retryable)
+    except ValueError as e:
+        return _err("bad_param", str(e), retryable=False)
     except Exception as e:  # 其它未知异常,不抛 500
         return _err("choerodon", f"{type(e).__name__}: {e}", retryable=False)
 
 
 @_tool()
 def choerodon_list_projects(keyword: str = "", size: int = 100) -> str:
-    """列出或搜索当前账号可访问的猪齿鱼项目；只读，返回真实 projectId 与 JSON ok/error.retryable。"""
+    """实时查询可访问的猪齿鱼项目；keyword 支持 ID、名称、编码或完整任务编号，返回真实 projectId。"""
     return _choerodon_call("list_projects", keyword=keyword, size=size)
 
 
@@ -694,7 +729,7 @@ def choerodon_list_issue(
     size: int = 20,
     project_id: str = "",
 ) -> str:
-    """按关键词、经办人或状态查询猪齿鱼任务；只读，返回 JSON ok 或 error.retryable。"""
+    """查询猪齿鱼任务；完整编号自动按前缀匹配可访问项目并精确查号，支持大小写及 sass→saas 别名，返回 resolution/projectId 供详情、评论、附件沿用。未知前缀或显式项目冲突报不可重试错误；普通关键词/纯数字沿用指定或默认项目。只读。"""
     return _choerodon_call(
         "list_issue", keyword=keyword, assignee=assignee, status=status,
         size=size, project_id=project_id or None,
@@ -1046,76 +1081,10 @@ def check_marmot_script_static(
         return _err("static_check", str(e), retryable=False)
 
 
-# ============================================================================
-# gitlab_* 代码平台（GitLab 仓库：项目/代码/文件/目录/分支，整合自 gitlab-code-mcp）
-# ============================================================================
-
-@_tool()
-def gitlab_search_projects(query: str, per_page: int = 20) -> str:
-    """搜索 GitLab 项目；仅在配置显式启用时注册，默认不暴露，返回 JSON ok 或 error.retryable。"""
-    if not GITLAB_SEARCH_ENABLED:
-        return _err(
-            "capability_disabled",
-            "GitLab 项目/代码搜索当前未启用，请直接使用 search_repo 检索本地代码。",
-            retryable=False,
-        )
-    try:
-        client = gitlab.GitLabClient()
-        items = client.list_projects(query, per_page=per_page)
-        slim = [
-            {
-                "id": p.get("id"),
-                "name": p.get("name"),
-                "path_with_namespace": p.get("path_with_namespace"),
-                "web_url": p.get("web_url"),
-                "default_branch": p.get("default_branch"),
-            }
-            for p in items
-        ]
-        return _ok({"count": len(slim), "projects": slim}, "gitlab")
-    except gitlab.GitLabError as e:
-        return _err("gitlab", str(e), retryable=True)
-
-
-@_tool()
-def gitlab_search_code(query: str, per_page: int = 20) -> str:
-    """搜索 GitLab 代码；仅在配置显式启用时注册，默认不暴露，返回 JSON ok 或 error.retryable。"""
-    if not GITLAB_SEARCH_ENABLED:
-        return _err(
-            "capability_disabled",
-            "GitLab 项目/代码搜索当前未启用，请直接使用 search_repo 检索本地代码。",
-            retryable=False,
-        )
-    try:
-        client = gitlab.GitLabClient()
-        results = client.search_code(query, per_page=per_page)
-        slim = [
-            {
-                "project_id": r.get("project_id"),
-                "path_with_namespace": r.get("path_with_namespace"),
-                "path": r.get("path"),
-                "filename": r.get("filename"),
-                "startline": r.get("startline"),
-                "data": (r.get("data") or "")[:300],
-                "ref": r.get("ref"),
-            }
-            for r in results
-        ]
-        return _ok({"count": len(slim), "results": slim}, "gitlab")
-    except gitlab.GitLabError as e:
-        return _err("gitlab", str(e), retryable=True)
-
-
-# 已知不可用的搜索能力不暴露给 Agent，避免每次先等待失败再回退本地。
-# 精确分支、目录和文件读取工具在下方继续独立注册。
-if not GITLAB_SEARCH_ENABLED:
-    mcp.remove_tool("gitlab_search_projects")
-    mcp.remove_tool("gitlab_search_code")
-
-
+# GitLab exact-read tools require a project/path already supplied by the user or evidence.
 @_tool()
 def gitlab_get_file(project_id: str, path: str, ref: str = "master") -> str:
-    """读取已知 GitLab project/ref/path 的文件；只读，不用枚举绕过搜索禁用，返回 JSON ok 或 error.retryable。"""
+    """读取已知 GitLab project/ref/path 的文件；只读，不发现或遍历项目，返回 JSON ok 或 error.retryable。"""
     try:
         content = gitlab.GitLabClient().get_file(project_id, path, ref=ref)
         return _ok({"project_id": project_id, "path": path, "ref": ref, "content": content}, "gitlab")
@@ -1158,168 +1127,6 @@ def gitlab_list_branches(project_id: str, per_page: int = 50) -> str:
         return _ok({"count": len(slim), "branches": slim}, "gitlab")
     except gitlab.GitLabError as e:
         return _err("gitlab", str(e), retryable=True)
-
-
-# ============================================================================
-# nexus_* Nexus 中心仓库只读访问（搜索/读取/受控下载；严禁上传、删除、改配置）
-# 未配置 NEXUS_BASE_URL 时返回 nexus_unconfigured，提示按 .env.example 补齐。
-# ============================================================================
-
-def _nexus_failure(e: nexus.NexusError, code: str = "nexus") -> str:
-    message = str(e)
-    retryable = "认证/授权失败" not in message and "拒绝" not in message
-    return _err(code if retryable else "nexus_auth", message, retryable=retryable)
-
-
-@_tool()
-def nexus_list_repositories() -> str:
-    """列出 Nexus 中心仓库全部仓库及格式/类型；只读，返回 JSON ok 或 error.retryable。"""
-    try:
-        repos = nexus.get_client().list_repositories()
-        return _ok({"count": len(repos), "repositories": repos}, "nexus")
-    except nexus.NexusError as e:
-        return _nexus_failure(e, "nexus_repositories")
-
-
-@_tool()
-def nexus_search(
-    q: str = "",
-    repository: str = "",
-    group: str = "",
-    name: str = "",
-    version: str = "",
-    extension: str = "",
-    classifier: str = "",
-    limit: int = 50,
-    continuation_token: str = "",
-) -> str:
-    """在 Nexus 搜索 Maven 组件（group/name/version 精确过滤优先于 q 全文）；只读，返回 JSON ok 或 error.retryable。"""
-    if not any(value.strip() for value in (q, repository, group, name)):
-        return _err(
-            "bad_param",
-            "q、repository、group、name 至少提供一项非空值，不支持全库无条件列举",
-            retryable=False,
-        )
-    try:
-        limit = _bounded_limit(limit, 200)
-        client = nexus.get_client()
-        result = client.search(
-            q=q.strip(), repository=repository.strip() or client.default_repository(),
-            group=group.strip(), name=name.strip(), version=version.strip(),
-            extension=extension.strip(), classifier=classifier.strip(),
-            limit=limit, continuation_token=continuation_token.strip(),
-        )
-        return _ok(result, "nexus")
-    except nexus.NexusError as e:
-        return _nexus_failure(e, "nexus_search")
-
-
-_advertise_nonempty_any_of("nexus_search", "q", "repository", "group", "name")
-
-
-@_tool()
-def nexus_search_assets(
-    q: str = "",
-    repository: str = "",
-    group: str = "",
-    name: str = "",
-    version: str = "",
-    extension: str = "",
-    classifier: str = "",
-    limit: int = 50,
-    continuation_token: str = "",
-) -> str:
-    """在 Nexus 按文件（资产）粒度搜索并返回可下载的 download_url；只读，返回 JSON ok 或 error.retryable。"""
-    if not any(value.strip() for value in (q, repository, group, name)):
-        return _err(
-            "bad_param",
-            "q、repository、group、name 至少提供一项非空值，不支持全库无条件列举",
-            retryable=False,
-        )
-    try:
-        limit = _bounded_limit(limit, 200)
-        client = nexus.get_client()
-        result = client.search_assets(
-            q=q.strip(), repository=repository.strip() or client.default_repository(),
-            group=group.strip(), name=name.strip(), version=version.strip(),
-            extension=extension.strip(), classifier=classifier.strip(),
-            limit=limit, continuation_token=continuation_token.strip(),
-        )
-        return _ok(result, "nexus")
-    except nexus.NexusError as e:
-        return _nexus_failure(e, "nexus_search_assets")
-
-
-_advertise_nonempty_any_of("nexus_search_assets", "q", "repository", "group", "name")
-
-
-@_tool()
-def nexus_download_artifact(
-    asset_url: str = "",
-    repository: str = "",
-    asset_path: str = "",
-    dest_dir: str = "",
-    filename: str = "",
-) -> str:
-    """下载单个 Nexus 构件（jar/pom 等）到本地目录并返回 sha256；asset_url 须来自 nexus_search* 结果，或传 repository+asset_path。"""
-    if not asset_url.strip() and not asset_path.strip():
-        return _err(
-            "bad_param",
-            "请传 asset_url（来自 nexus_search*/search_assets 结果的 download_url），"
-            "或传 asset_path（repository 缺省时用默认仓库）",
-            retryable=False,
-        )
-    try:
-        result = nexus.get_client().download(
-            asset_url=asset_url.strip(),
-            repository=repository.strip(),
-            asset_path=asset_path.strip(),
-            dest_dir=dest_dir.strip(),
-            filename=filename.strip(),
-        )
-        return _ok(result, "nexus")
-    except nexus.NexusError as e:
-        return _nexus_failure(e, "nexus_download")
-
-
-@_tool()
-def nexus_check_maven_artifact(
-    group: str,
-    name: str,
-    version: str,
-    repository: str = "",
-    extensions: str = "pom,jar",
-    classifier: str = "",
-) -> str:
-    """按 Maven GAV 坐标直读探测构件是否存在（pom/jar 等）；只读 HEAD 不落盘，适用于无浏览权限的仓库。"""
-    if not all(value.strip() for value in (group, name, version)):
-        return _err("bad_param", "group、name、version 均为必填", retryable=False)
-    try:
-        result = nexus.get_client().check_maven_artifact(
-            group=group, name=name, version=version,
-            repository=repository, extensions=extensions, classifier=classifier,
-        )
-        return _ok(result, "nexus")
-    except nexus.NexusError as e:
-        return _nexus_failure(e, "nexus_check_maven")
-
-
-@_tool()
-def nexus_get_maven_metadata(
-    group: str,
-    name: str,
-    repository: str = "",
-) -> str:
-    """直读 maven-metadata.xml 返回构件可用版本列表/latest/release；只读，适用于无浏览权限的仓库。"""
-    if not all(value.strip() for value in (group, name)):
-        return _err("bad_param", "group、name 均为必填", retryable=False)
-    try:
-        result = nexus.get_client().get_maven_metadata(
-            group=group, name=name, repository=repository,
-        )
-        return _ok(result, "nexus")
-    except nexus.NexusError as e:
-        return _nexus_failure(e, "nexus_maven_metadata")
 
 
 # ============================================================================

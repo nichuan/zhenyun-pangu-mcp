@@ -25,7 +25,8 @@
 > - **数据能力**：`archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` / `archery_resolve_workflow_target`
 > - **ES 只读能力**：`es_search` / `es_count` / `es_get`（prod/dev/test，未配置时返回明确降级提示）
 > - **业务系统能力**：`choerodon_*` 系列（猪齿鱼协作，以只读查询为主，评论新增、编辑和删除为需授权的写操作）
-> - **代码与脚本能力**：`search_repo`（本地跨仓搜索）+ `search_adapter_scripts` / `search_standalone_scripts`（只发现脚本身份）+ 已知路径的 `gitlab_list_branches/list_tree/get_file` 精确读取。当前脚本正文统一由 Script Platform MCP 获取；GitLab 项目/代码搜索默认禁用。
+> - **代码与脚本能力**：`search_repo`（本地跨仓搜索）+ `search_adapter_scripts` / `search_standalone_scripts`（只发现脚本身份）+ 已知路径的 `gitlab_list_branches/list_tree/get_file` 精确读取。普通代码搜索只使用本地仓库；GitLab 项目/代码搜索工具已移除。当前脚本正文统一由 Script Platform MCP 获取。
+> - **本地交付配置**：`marmot_get_delivery_config` 只读查询 `.env` 的 `MARMOT_DELIVERY_ROOT`。用户未指定输出目录时先查询，有效配置直接使用，不重复询问路径。
 >
 > **只读/写边界（安全）**：日志查询、Schema/数据查询、猪齿鱼查询类（`choerodon_*_issue` / `choerodon_list_*` / `choerodon_search_*` / `choerodon_get_*` / `choerodon_download_*`）、代码检索为**只读**，Agent 可自主调用。`archery_query` 的用户 SQL 允许单条 `SELECT`、`EXPLAIN SELECT`、`SHOW CREATE TABLE`；SELECT 支持 JOIN、EXISTS、只读子查询、UNION、CASE、IN 值列表和白名单无副作用函数，也接受 SQL 开头的普通 Mapper 标记注释。仍拒绝其它 `SHOW/DESC`、`WITH`、多语句、可执行注释、窗口函数、非白名单函数或任何写入语法；实例/库/表结构由专用工具提供。本 MCP 不直接执行生产 INSERT/UPDATE/DELETE；用户明确要求提交数据修复工单时，只把已核验的 DML 交给 `archery_workflow_sqlcheck`，通过后用一次性凭证调用 `archery_submit_workflow` 创建审批工单，提交工单不等于执行 SQL。认知层的 `search_*` / `get_*` / `diagnose_context` / `list_sql_templates` 为只读；`save_*`、`update_*`、`delete_*`、`add_table_relation`、`upsert_table_knowledge` 和使用统计工具会写入 knowledge_docs / sql_templates / table_catalog / table_relations 元数据，不影响业务数据，调用前应确认沉淀内容。`choerodon_add_comment`、`choerodon_update_comment` 和 `choerodon_delete_comment` 会真实修改猪齿鱼评论，用户明确要求写入且目标与正文可确定时直接提交并回读，无须强制预览或再次确认；删除须核对目标；新增/编辑正文传规范 Markdown，由工具渲染为 HTML。
 
@@ -55,11 +56,12 @@ Markdown，否则编辑器二次解析时可能出现表格或代码块样式互
 | `diagnose_context` | `diagnose_context` | 组合诊断：自动汇集 认知 → 模板 → 表 → 关系 的诊断上下文 |
 | 知识库维护写操作 | `save_knowledge` / `update_knowledge` / `delete_knowledge` / `save_sql_template` / `list_sql_templates` / `update_sql_template` / `delete_sql_template` / `record_template_usage` / `add_table_relation` / `record_table_usage` / `upsert_table_knowledge` | 沉淀、维护知识/模板/表目录/关联关系；仅写认知层元数据，不修改业务库 |
 | `obs_*` | `obs_sls_query` / `obs_sls_targets` / `obs_log_query` / `obs_log_trace` / `obs_log_datasources` | 日志能力：阿里云 SLS（国内公有云盘古 prod + 非生产 dev/test 全覆盖）+ Loki（仅 AWS 海外全环境） |
-| `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` / `archery_resolve_workflow_target` / `archery_workflow_sqlcheck` / `archery_submit_workflow` | 双站点只读查询与租户/库/实例发现；按审批组和实例名称解析审批所需数字 ID；用户明确要求时校验并提交纯 DML 审批工单，不执行 SQL |
+| `archery_*` | `archery_query` / `archery_describe_table` / `archery_list_columns` / `archery_query_tenant` / `archery_list_databases` / `archery_list_instances` / `archery_resolve_workflow_target` / `archery_workflow_sqlcheck` / `archery_submit_workflow` | 双站点只读查询与租户/库/实例发现；按已核实实例通过 HTTP 自动发现唯一审批组和数字 ID，无需浏览器取参；用户明确要求时校验并提交纯 DML 审批工单，不执行 SQL |
 | `es_*` | `es_search` / `es_count` / `es_get` | 工作台 ES 的 prod/dev/test 只读查询；禁止写入，单次最多返回 `ES_MAX_SIZE` 条 |
 | 脚本身份发现 | `search_adapter_scripts` / `search_standalone_scripts` | 只按租户、服务、编码或描述发现候选；命中后使用 `zhenyun-script-platform-mcp` 的 `adapter_get` / `independent_script_get` 读取权威当前态 |
+| Marmot 静态审查 | `check_marmot_script_static` | 本地词法检查与调用方提供的需求规则，不执行脚本；`rules_json.allowed_runtime_modules` 仅放行经目标运行时核实的精确 Marmot 模块字面量 require，不允许 Node、动态或相对路径加载。`ok=true` 只证明调用成功，检查结果看 `status/findings`，不证明生产运行或部署 |
 | `choerodon_*` | `choerodon_list_projects` / `choerodon_query_issue` / `choerodon_list_issue` / `choerodon_search_users` / `choerodon_get_status_map` / `choerodon_search_tasks_by_person` / `choerodon_list_attachments` / `choerodon_download_attachment` / `choerodon_list_comments` / `choerodon_preview_comment` / `choerodon_add_comment` / `choerodon_update_comment` / `choerodon_delete_comment` | 业务系统能力：猪齿鱼协作；评论预览为离线只读，新增、按版本编辑和删除是写操作，用户明确要求且目标与内容可确定时直接提交并回读；预览仅在用户要求时使用 |
-| `gitlab_*` | `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 仅对已知 project/ref/path 做精确读取；`gitlab_search_projects/code` 默认不注册，避免失败后回退 |
+| `gitlab_*` | `gitlab_get_file` / `gitlab_list_tree` / `gitlab_list_branches` | 仅对已知 project/ref/path 做精确读取；GitLab 项目/代码搜索工具已移除，不作为本地搜索的回退 |
 | `search_repo` | `search_repo` | 普通代码检索的默认入口：跨本地代码仓库搜索（内容 / 文件名 / 模块结构） |
 
 旧 `get/search_*_script_source` Python 实现暂时保留作紧急回滚，但默认不注册为 MCP 工具，避免
@@ -187,6 +189,13 @@ uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
 
 ## 打包为 Codex 插件
 
+猪齿鱼完整任务编号可直接传入 `choerodon_list_issue(keyword="H-SAAS-4900")`，无需预先填写项目 ID。
+工具按当前账号可访问项目的真实 `code` 定位（支持多段编码、大小写以及明确的 `sass→saas` 兼容别名），
+精确匹配编号并返回 `resolution.projectId`、项目名称和规范编号；后续详情、评论和附件必须沿用该项目 ID。
+项目目录在进程内缓存 5 分钟，未识别前缀仅刷新一次；`choerodon_list_projects` 始终实时刷新目录，
+也支持完整编号定位项目。未知前缀、停用项目和显式项目冲突不会回退默认项目或逐项目尝试；
+只有无完整编号的普通关键词、按人或纯数字短号查询仍使用指定/默认项目。任务数据不缓存。
+
 工作区中的 `custom-skills/`、本 MCP 与独立的 `zhenyun-script-platform-mcp` 已打包为个人插件
 `zhenyun-pangu-toolkit`。
 修改任意 skill 或 MCP 源码后，在本目录执行：
@@ -226,15 +235,22 @@ uv run python scripts/rebuild_embeddings.py --table knowledge_docs --limit 20
 | Choerodon | `CHOERODON_BASE_URL` / `CHOERODON_USERNAME` / `CHOERODON_PASSWORD` | 猪齿鱼网关与登录凭据 |
 | SLS | `SLS_PANGU_PROD_ACCESS_KEY_ID` / `SLS_PANGU_PROD_ACCESS_KEY_SECRET` | 盘古 prod 阿里云日志凭据 |
 | | `SLS_PANGU_NONPROD_ACCESS_KEY_ID` / `SLS_PANGU_NONPROD_ACCESS_KEY_SECRET` | 盘古非生产（dev/test）阿里云日志凭据 |
-| GitLab | `GITLAB_BASE_URL` / `GITLAB_TOKEN`（或 `GITLAB_USERNAME`/`GITLAB_PASSWORD`） | GitLab 仓库地址与凭据 |
-| | `GITLAB_SEARCH_ENABLED` | 默认 `false`，不注册不可用的 GitLab 项目/代码搜索；仅平台能力恢复后显式开启 |
-| | `GITLAB_SEARCH_ROOT_ID` / `GITLAB_SEARCH_ROOT_GROUP` | 代码搜索根目录（限定 group/project，避免全站噪声） |
+| GitLab | `GITLAB_BASE_URL` / `GITLAB_TOKEN`（或 `GITLAB_USERNAME`/`GITLAB_PASSWORD`） | 仅用于已知项目和路径的精确读取；没有项目/代码搜索开关 |
 | 脚本发现/兼容 | `PANGU_EXPOSE_LEGACY_SCRIPT_READ_TOOLS` | 默认 `false`，只暴露两项身份发现工具；仅紧急回滚时临时开启旧正文工具 |
 | | `ADAPTER_SCRIPT_CACHE_*` / `ADAPTER_SCRIPT_*_LINES` / `ADAPTER_SCRIPT_MAX_RANGE_CHARS` | 仅旧正文工具启用时使用的解码缓存与返回范围配置 |
 | Embedding | `CF_API_TOKEN` / `CF_ACCOUNT_ID` / `CF_EMBED_MODEL` / `CF_EMBEDDING_DIMENSION` | Cloudflare Workers AI 凭据（默认 `@cf/qwen/qwen3-embedding-0.6b` / 1024 维），向量写单列 `embedding`；未配置时语义检索降级为关键词 |
 | 其他 | `PG_ROOT` | 本地跨仓搜索根目录（默认本仓库根） |
+| 本地交付 | `MARMOT_DELIVERY_ROOT` | Marmot 产物根目录，绝对路径或 `~/...`，无默认值；每次调用重读 `.env`，宿主显式环境变量优先 |
+| 配置加载 | `MCP_ENV_DIR` | `.env` 所在目录；插件通过此变量读取工作区配置，不复制 `.env` 到缓存 |
 
 > 凭据请勿提交 git；`.env` 已由 `.gitignore` 排除，仅 `.env.example`（占位符版）入库。
+
+`marmot_get_delivery_config` 的 `ok` 表示查询完成，`valid` 表示目录是否可用；返回
+`config_source`、`env_file`、`status`、`output_root` 和 MCP 进程的可写性，不返回其它配置或秘密。
+`missing_env_file`、`not_configured`、`invalid_path`、`not_directory` 和 `not_writable` 分别说明
+配置文件未加载、键为空、路径不合法、路径是文件和权限不足；工具未暴露是插件加载问题，
+不能认定 `.env` 未配置。不存在的目录只检查最近已有父目录，不创建目录。Agent 实际写文件
+仍受宿主权限控制。新增工具需重新加载插件；之后仅修改 `.env` 的路径不需要重启 MCP。
 
 ## 输出与错误规范（Agent 可据此判断）
 

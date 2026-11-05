@@ -55,6 +55,13 @@ def test_archery_inputs_expose_required_fields_and_finite_choices():
     assert repo_mode_schema["enum"] == ["content", "filename", "modules"]
 
 
+def test_workflow_target_requires_instance_but_can_discover_group():
+    schema = server.mcp._tool_manager._tools["archery_resolve_workflow_target"].parameters
+    assert "instance_name" in schema["required"]
+    assert "group_name" not in schema["required"]
+    assert schema["properties"]["group_name"]["default"] == ""
+
+
 def test_archery_sql_parameter_errors_are_not_retryable():
     result = json.loads(server.archery_query("SELECT SLEEP(1)"))
 
