@@ -64,6 +64,7 @@ READ_ONLY_TOOLS = frozenset({
 WRITE_TOOLS = frozenset({
     'add_table_relation',
     'archery_submit_workflow',
+    'choerodon_ensure_marmot_subtask',
     'choerodon_add_comment',
     'choerodon_update_comment',
     'choerodon_delete_comment',

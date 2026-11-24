@@ -47,7 +47,7 @@ FastMCPSettings.model_rebuild()
 mcp = FastMCP(
     "zhenyun-pangu-mcp",
     instructions=(
-        "SRM tools: business DB/ES read-only; knowledge/comment tools have side effects. "
+        "SRM tools: business DB/ES read-only; knowledge, comment, and Choerodon subtask tools have side effects. "
         "Script discovery tools only locate adapter/independent identities; use "
         "zhenyun-script-platform-mcp as the authoritative source for current script body, "
         "version, debug, save, and deployment. "
@@ -701,7 +701,9 @@ def _choerodon_call(dispatch_name: str, **kwargs) -> str:
         return _ok(data, "choerodon")
     except choerodon.ChoerodonError as e:
         # 写请求可能已到达服务端；结果不确定时先回读，不自动重试。
-        retryable = dispatch_name not in {"create_comment", "update_comment", "delete_comment"}
+        retryable = dispatch_name not in {
+            "ensure_marmot_subtask", "create_comment", "update_comment", "delete_comment"
+        }
         return _err("choerodon", str(e), retryable=retryable)
     except ValueError as e:
         return _err("bad_param", str(e), retryable=False)
@@ -776,6 +778,32 @@ def choerodon_list_comments(issue_id: str, size: int = 100, project_id: str = ""
 def choerodon_preview_comment(comment: str) -> str:
     """离线返回完整 Markdown 与将提交的 HTML 评论正文；只读，仅在用户要求预览时使用。"""
     return _choerodon_call("preview_comment", comment=comment)
+
+
+@_tool()
+def choerodon_ensure_marmot_subtask(
+    requirement_num: str,
+    tenant_code: str,
+    artifact_type: Literal["ADAPTOR", "SCRIPT_LIB", "CODE_BLOCK", "QUERY_BLOCK", "API_PUBLISH"],
+    artifact_code: str,
+    description: str = "",
+) -> str:
+    """确保指定需求下存在该 Marmot 产物子任务：先按父需求与精确标题查重，已有则跳过，缺失才创建。
+
+    传本次变更新增的完整需求编号，以及从平台当前态读取的 tenant_code、artifact_type 和原始 artifact_code。
+    工具统一拼成 tenant_code|artifact_type|artifact_code，并将完整编码写入标题、描述和唯一编码字段；
+    若发现同一产物的裸编码旧格式任务则返回 format_mismatch，不会重复创建或自动改写旧任务。
+    不要自行省略前缀或从脚本历史描述提取需求号。
+    这是猪齿鱼写操作，只能在用户明确要求的本次交付/部署流程中调用；结果不确定时先回读，不重试。
+    """
+    return _choerodon_call(
+        "ensure_marmot_subtask",
+        requirement_num=requirement_num,
+        tenant_code=tenant_code,
+        artifact_type=artifact_type,
+        artifact_code=artifact_code,
+        description=description,
+    )
 
 
 @_tool()

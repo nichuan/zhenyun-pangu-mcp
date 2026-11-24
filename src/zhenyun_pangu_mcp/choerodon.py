@@ -21,6 +21,7 @@ CHOERODON_PROJECT_ID / CHOERODON_USERNAME / CHOERODON_PASSWORD / CHOERODON_TOKEN
 from __future__ import annotations
 
 import base64
+from html import escape
 import json
 import os
 import re
@@ -223,9 +224,9 @@ def _headers(token: str, content_type: bool = False) -> dict:
 
 
 def _request(method: str, path: str, *, params: Optional[dict] = None,
-             json_body: Optional[dict] = None, data: Optional[dict] = None,
-             timeout: int = 30) -> Any:
-    """统一请求,401 自动刷新 token 重试一次。"""
+             json_body: Any = None, data: Optional[dict] = None,
+             timeout: int = 30, retry_401: bool = True) -> Any:
+    """统一请求；可关闭 401 自动重试，避免创建类写请求重复发送。"""
     def do(token):
         try:
             return requests.request(
@@ -238,7 +239,7 @@ def _request(method: str, path: str, *, params: Optional[dict] = None,
             # 统一转成 ChoerodonError，让上层按可重试的外部依赖错误处理。
             raise ChoerodonError(f"API 请求网络错误 {method} {path}: {e}") from e
     resp = do(get_access_token())
-    if resp.status_code == 401:
+    if resp.status_code == 401 and retry_401:
         _clear_token_cache()
         resp = do(get_access_token())
     # 2xx 均视为成功:200 OK / 201 Created(POST 创建) / 204 No Content 等。
@@ -402,6 +403,17 @@ def get_issue_detail(issue_id: str, project_id: str | None = None) -> dict:
         {"fileName": str(a.get("fileName") or ""), "url": str(a.get("url") or "")}
         for a in (data.get("issueAttachmentVOList") or [])
     ]
+    raw_subtasks = data.get("subIssueVOList")
+    subtasks = [
+        {
+            "issueId": str(item.get("issueId") or ""),
+            "issueNum": str(item.get("issueNum") or ""),
+            "summary": str(item.get("summary") or ""),
+            "typeCode": str(item.get("typeCode") or ""),
+        }
+        for item in raw_subtasks
+        if isinstance(item, dict)
+    ] if isinstance(raw_subtasks, list) else []
     tenant_code = _tenant_code(data)
     if not tenant_code:
         # 详情接口不返回 foundationFieldValue,用完整 issueNum 反查 work_list 回填
@@ -427,8 +439,310 @@ def get_issue_detail(issue_id: str, project_id: str | None = None) -> dict:
         "typeName": str(itype.get("name") or ""),
         "priority": str(pri.get("name") or ""),
         "creator": str(creator),
+        "parentIssueId": str(data.get("parentIssueId") or ""),
+        "parentIssueNum": str(data.get("parentIssueNum") or ""),
         "description_html": str(data.get("description") or ""),
         "attachments": attachments,
+        "subtasksAvailable": isinstance(raw_subtasks, list),
+        "subtasks": subtasks,
+    }
+
+
+MARMOT_SUBTASK_TITLES = {
+    "ADAPTOR": "埋点脚本管理",
+    "SCRIPT_LIB": "独立脚本",
+    "CODE_BLOCK": "Code Block",
+    "QUERY_BLOCK": "Query Block",
+    "API_PUBLISH": "Api 发布",
+}
+
+
+def _marmot_subtask_summary(artifact_type: str, unique_code: str) -> str:
+    prefix = MARMOT_SUBTASK_TITLES.get(artifact_type)
+    if not prefix:
+        supported = ", ".join(MARMOT_SUBTASK_TITLES)
+        raise ValueError(f"artifact_type 必须是以下 Marmot 类型之一：{supported}")
+    code = str(unique_code or "").strip()
+    if not code:
+        raise ValueError("unique_code 不能为空")
+    return f"{prefix}：{code}"
+
+
+def _canonical_marmot_unique_code(tenant_code: str, artifact_type: str,
+                                 artifact_code: str) -> tuple[str, str, str]:
+    tenant = str(tenant_code or "").strip()
+    code = str(artifact_code or "").strip()
+    if not tenant or "|" in tenant:
+        raise ValueError("tenant_code 不能为空且不能包含竖线")
+    prefix = f"{tenant}|{artifact_type}|"
+    if code.startswith(prefix):
+        code = code[len(prefix):]
+    elif "|" in code:
+        raise ValueError(
+            f"artifact_code 含有不匹配的租户/类型前缀；期望前缀 {prefix}"
+        )
+    if not code:
+        raise ValueError("artifact_code 不能为空")
+    return prefix + code, code, tenant
+
+
+def _single_match(items: list, predicate, label: str) -> dict:
+    matches = [item for item in items if isinstance(item, dict) and predicate(item)]
+    if len(matches) != 1:
+        raise ChoerodonError(f"{label}匹配数为 {len(matches)}，无法安全创建子任务")
+    return matches[0]
+
+
+def _marmot_subtask_create_values(project_id: str, issue_type_id: str,
+                                  artifact_type: str, unique_code: str) -> list[dict]:
+    fields_data = _request(
+        "POST",
+        f"/agile/v1/projects/{project_id}/field_value/list?organizationId={ORGANIZATION_ID}",
+        json_body={
+            "schemeCode": "agile_issue",
+            "issueTypeId": issue_type_id,
+            "pageCode": "agile_issue_create",
+        },
+    )
+    fields = _list(fields_data)
+    marmot_type_field = _single_match(
+        fields, lambda item: item.get("fieldCode") == "pro_004_1", "Marmot 子类型字段"
+    )
+    unique_code_field = _single_match(
+        fields, lambda item: item.get("fieldCode") == "pro_005", "Marmot 唯一编码字段"
+    )
+    marmot_field_id = str(marmot_type_field.get("fieldId") or "")
+    if not marmot_field_id or not unique_code_field.get("fieldId"):
+        raise ChoerodonError("Marmot 子任务字段缺少 fieldId，未创建任务")
+
+    options_data = _request(
+        "GET",
+        f"/agile/v1/projects/{project_id}/field_value/{marmot_field_id}/options"
+        f"?searchValue=&page=0&size=50&organizationId={ORGANIZATION_ID}&enabled=true",
+    )
+    options = _list(options_data)
+    subtype = _single_match(
+        options,
+        lambda item: item.get("code") == artifact_type,
+        f"Marmot 子类型 {artifact_type}",
+    )
+    subtype_id = str(subtype.get("id") or "")
+    if not subtype_id:
+        raise ChoerodonError(f"Marmot 子类型 {artifact_type} 缺少选项 id，未创建任务")
+    return [
+        {
+            "fieldType": "single",
+            "value": subtype_id,
+            "fieldId": marmot_field_id,
+            "fieldCode": "pro_marmot_type",
+        },
+        {
+            "fieldType": "input",
+            "value": unique_code,
+            "fieldId": unique_code_field["fieldId"],
+            "fieldCode": "pro_seeddata_unique_code",
+        },
+    ]
+
+
+def ensure_marmot_subtask(requirement_num: str, tenant_code: str, artifact_type: str,
+                          artifact_code: str, description: str = "") -> dict:
+    """确保当前需求下存在对应的 Marmot 子任务；查重后仅在缺失时创建。
+
+    requirement_num 必须是本次变更新增的完整需求编号；不会从脚本历史描述提取需求号。
+    子任务唯一编码统一为 tenant_code|artifact_type|artifact_code；标题和自定义字段共用该完整编码。
+    """
+    requirement = str(requirement_num or "").strip()
+    route = _resolve_issue_project(requirement)
+    project_id = route["projectId"]
+    lookup = list_issue_search(requirement, size=20, project_id=project_id)
+    normalized_num = route["issueNum"].casefold()
+    candidates = [
+        item for item in lookup.get("items", [])
+        if str(item.get("fullIssueNum") or item.get("issueNum") or "").casefold() == normalized_num
+    ]
+    if len(candidates) != 1:
+        raise ChoerodonError(
+            f"需求 {requirement} 精确匹配数为 {len(candidates)}，未创建子任务"
+        )
+    parent_brief = candidates[0]
+    parent = get_issue_detail(parent_brief["issueId"], project_id)
+    if parent.get("typeCode") != "story":
+        raise ChoerodonError(f"{requirement} 不是需求故事（typeCode={parent.get('typeCode') or '未知'}），未创建子任务")
+    if parent.get("fullIssueNum", "").casefold() != normalized_num:
+        raise ChoerodonError(f"需求详情编号与输入 {requirement} 不一致，未创建子任务")
+    if not parent.get("subtasksAvailable"):
+        raise ChoerodonError("猪齿鱼详情未返回子任务列表，无法完成查重；未创建子任务")
+
+    unique_code, bare_code, tenant = _canonical_marmot_unique_code(
+        tenant_code, artifact_type, artifact_code
+    )
+    summary = _marmot_subtask_summary(artifact_type, unique_code)
+    legacy_summary = _marmot_subtask_summary(artifact_type, bare_code)
+    matching_children = [
+        item for item in parent.get("subtasks", [])
+        if item.get("summary") in {summary, legacy_summary}
+    ]
+    if len(matching_children) > 1:
+        return {
+            "ok": True,
+            "state": "duplicate_matches",
+            "requirementNum": requirement,
+            "summary": summary,
+            "matches": matching_children,
+            "note": "父需求下已有多条同标题子任务；未新增，请人工核对。",
+        }
+    if matching_children:
+        child = matching_children[0]
+        is_canonical = child.get("summary") == summary
+        return {
+            "ok": True,
+            "state": "already_exists" if is_canonical else "format_mismatch",
+            "requirementNum": requirement,
+            "parentIssueNum": parent["fullIssueNum"],
+            "issueId": child["issueId"],
+            "issueNum": child["issueNum"],
+            "summary": child.get("summary") or "",
+            "expectedSummary": summary,
+            "uniqueCode": unique_code,
+            "note": (
+                "对应子任务已存在，未重复创建。"
+                if is_canonical else "发现缺少租户/类型前缀的旧格式子任务；未重复创建，请修正该任务后再继续。"
+            ),
+        }
+
+    issue_types = _list(_request(
+        "GET",
+        f"/agile/v1/projects/{project_id}/schemes/query_issue_types_with_sm_id"
+        "?apply_type=agile&only_enabled=true",
+    ))
+    marmot_issue_type = _single_match(
+        issue_types,
+        lambda item: item.get("name") == "Marmot" and item.get("typeCode") == "sub_task",
+        "Marmot 工作项类型",
+    )
+    issue_type_id = str(marmot_issue_type.get("id") or "")
+    if not issue_type_id:
+        raise ChoerodonError("Marmot 工作项类型缺少 id，未创建任务")
+
+    priorities = _list(_request(
+        "GET", f"/agile/v1/projects/{project_id}/priority/list_by_org"
+    ))
+    priority = _single_match(priorities, lambda item: item.get("name") == "中", "默认优先级“中”")
+    priority_id = str(priority.get("id") or "")
+    if not priority_id:
+        raise ChoerodonError("默认优先级“中”缺少 id，未创建任务")
+    field_values = _marmot_subtask_create_values(
+        project_id, issue_type_id, artifact_type, unique_code
+    )
+
+    plain_description = str(description or "").strip()
+    if not plain_description:
+        plain_description = f"{requirement}\n{summary}"
+    else:
+        if requirement not in plain_description:
+            plain_description = f"{plain_description}\n{requirement}"
+        if summary not in plain_description:
+            plain_description = f"{plain_description}\n{summary}"
+    description_html = "".join(
+        f"<p>{escape(line)}</p>" for line in plain_description.splitlines() if line.strip()
+    )
+    create_body = {
+        "issueTypeId": issue_type_id,
+        "summary": summary,
+        "description": description_html,
+        "priorityId": priority_id,
+        "tag": [],
+        "productIds": [],
+        "typeCode": "sub_task",
+        "priorityCode": f"priority-{priority_id}",
+        "parentIssueId": parent["issueId"],
+        "programId": project_id,
+        "projectId": project_id,
+        "componentIssueRelVOList": [],
+        "featureVO": {},
+        "wsjfVO": {},
+        "versionIssueRelVOList": [],
+        "sprintId": 0,
+        "epicId": 0,
+        "piId": 0,
+        "relateIssueId": 0,
+        "labelIssueRelVOList": [],
+    }
+    try:
+        created = _request(
+            "POST",
+            f"/agile/v1/projects/{project_id}/issues?applyType=agile",
+            json_body=create_body,
+            retry_401=False,
+        )
+    except ChoerodonError as e:
+        raise ChoerodonError(
+            f"创建请求结果可能不确定；先按父需求和标题 {summary} 回读核实，不要重试：{e}"
+        ) from e
+    if not isinstance(created, dict) or not created.get("issueId") or not created.get("issueNum"):
+        raise ChoerodonError("创建接口未返回 issueId/issueNum；结果不确定，请先回读父需求，不要重试")
+    child_id = str(created["issueId"])
+    child_num = str(created["issueNum"])
+    try:
+        _request(
+            "POST",
+            f"/agile/v1/projects/{project_id}/field_value/{child_id}"
+            f"?organizationId={ORGANIZATION_ID}&schemeCode=agile_issue",
+            json_body=field_values,
+            retry_401=False,
+        )
+    except ChoerodonError as e:
+        raise ChoerodonError(
+            f"子任务 {child_num} 已创建，但 Marmot 类型/唯一编码字段保存失败：{e}；"
+            "请先回读任务核实，不要直接重试"
+        ) from e
+
+    try:
+        readback = get_issue_detail(child_id, project_id)
+    except ChoerodonError as e:
+        raise ChoerodonError(
+            f"子任务 {child_num} 已创建，但详情回读失败；请先核实，不要重试：{e}"
+        ) from e
+    readback_description = readback.get("description_html") or ""
+    if (
+        readback.get("summary") != summary
+        or readback.get("parentIssueId") != parent["issueId"]
+        or summary not in readback_description
+    ):
+        raise ChoerodonError(
+            f"子任务 {child_num} 已创建但回读未确认父子关系、完整编码标题或描述；请先核实，不要重试"
+        )
+    try:
+        parent_after = get_issue_detail(parent["issueId"], project_id)
+    except ChoerodonError as e:
+        raise ChoerodonError(
+            f"子任务 {child_num} 已创建，但父需求关联回读失败；请先核实，不要重试：{e}"
+        ) from e
+    if not parent_after.get("subtasksAvailable"):
+        raise ChoerodonError(
+            f"子任务 {child_num} 已创建但父需求回读未返回子任务列表；请先核实，不要重试"
+        )
+    readback_matches = [
+        item for item in parent_after.get("subtasks", []) if item.get("summary") == summary
+    ]
+    if len(readback_matches) != 1 or readback_matches[0].get("issueId") != child_id:
+        raise ChoerodonError(
+            f"子任务 {child_num} 已创建但父需求关联回读不唯一；请先核实，不要重试"
+        )
+    return {
+        "ok": True,
+        "state": "created",
+        "requirementNum": requirement,
+        "tenantCode": tenant,
+        "artifactType": artifact_type,
+        "artifactCode": bare_code,
+        "parentIssueNum": parent["fullIssueNum"],
+        "issueId": child_id,
+        "issueNum": child_num,
+        "summary": summary,
+        "uniqueCode": str(unique_code).strip(),
+        "note": "已创建 Marmot 子任务并回读确认父子关系。",
     }
 
 
@@ -1061,6 +1375,7 @@ CHOERODON_DISPATCH = {
     "download_attachment": download_attachment,
     "list_comments": lambda issue_id, size=100, project_id=None: list_issue_comments(issue_id, size, project_id),
     "preview_comment": preview_issue_comment,
+    "ensure_marmot_subtask": ensure_marmot_subtask,
     "create_comment": lambda issue_id, comment, project_id=None: create_issue_comment(issue_id, comment, project_id),
     "update_comment": lambda issue_id, comment_id, object_version_number, comment, project_id=None:
         update_issue_comment(issue_id, comment_id, object_version_number, comment, project_id),
